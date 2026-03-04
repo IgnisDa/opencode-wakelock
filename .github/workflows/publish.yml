@@ -47,7 +47,14 @@ jobs:
             echo "should_publish=true" >> $GITHUB_OUTPUT
           fi
 
+      - name: Debug OIDC environment
+        if: steps.check.outputs.should_publish == 'true'
+        run: |
+          echo "ACTIONS_ID_TOKEN_REQUEST_URL: ${ACTIONS_ID_TOKEN_REQUEST_URL:-not set}"
+          echo "ACTIONS_ID_TOKEN_REQUEST_TOKEN: ${ACTIONS_ID_TOKEN_REQUEST_TOKEN:+SET}"
+          npm --version
+          
       - name: Publish to npm
         if: steps.check.outputs.should_publish == 'true'
-        run: npm publish --access public
+        run: npm publish --access public --provenance
         # OIDC authentication is automatic - no token needed!
