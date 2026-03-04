@@ -33,11 +33,11 @@ function getActiveSessions(): string[] {
     const filePath = `${SESSIONS_DIR}/${sessionID}`;
     try {
       const pid = parseInt(readFileSync(filePath, "utf8").trim(), 10);
-      if (isProcessAlive(pid)) {
+      if (isProcessAlive(pid))
         active.push(sessionID);
-      } else {
+       else
         unlinkSync(filePath);
-      }
+
     } catch {}
   }
   return active;
@@ -77,9 +77,9 @@ function acquire(sessionID: string) {
   if (process.platform !== "darwin") return;
   ensureDirs();
   writeFileSync(`${SESSIONS_DIR}/${sessionID}`, String(process.pid));
-  if (!isCaffeinateRunning()) {
+  if (!isCaffeinateRunning())
     startCaffeinate();
-  }
+
 }
 
 function release(sessionID: string) {
@@ -88,25 +88,25 @@ function release(sessionID: string) {
     unlinkSync(`${SESSIONS_DIR}/${sessionID}`);
   } catch {}
   const remaining = getActiveSessions();
-  if (remaining.length === 0) {
+  if (remaining.length === 0)
     stopCaffeinate();
-  }
+
 }
 
 function startupCleanup() {
   if (process.platform !== "darwin") return;
   ensureDirs();
   const active = getActiveSessions();
-  if (active.length === 0) {
+  if (active.length === 0)
     stopCaffeinate();
-  }
+
 }
 
 export const WakelockPlugin: Plugin = async ({ client }) => {
   await client.app.log({
     body: {
-      service: "wakelock",
       level: "info",
+      service: "wakelock",
       message: "Plugin initializing",
       extra: { platform: process.platform, pid: process.pid },
     },
@@ -116,8 +116,8 @@ export const WakelockPlugin: Plugin = async ({ client }) => {
 
   await client.app.log({
     body: {
-      service: "wakelock",
       level: "info",
+      service: "wakelock",
       message: "Startup cleanup complete",
     },
   });
@@ -126,8 +126,8 @@ export const WakelockPlugin: Plugin = async ({ client }) => {
     event: async ({ event }) => {
       await client.app.log({
         body: {
-          service: "wakelock",
           level: "debug",
+          service: "wakelock",
           message: "Event received",
           extra: { type: event.type },
         },
@@ -139,10 +139,10 @@ export const WakelockPlugin: Plugin = async ({ client }) => {
         acquire(sessionID);
         await client.app.log({
           body: {
-            service: "wakelock",
             level: "info",
-            message: "Acquired wakelock (session busy)",
+            service: "wakelock",
             extra: { sessionID },
+            message: "Acquired wakelock (session busy)",
           },
         });
       }
@@ -153,10 +153,10 @@ export const WakelockPlugin: Plugin = async ({ client }) => {
         release(sessionID);
         await client.app.log({
           body: {
-            service: "wakelock",
             level: "info",
-            message: "Released wakelock (session idle)",
+            service: "wakelock",
             extra: { sessionID },
+            message: "Released wakelock (session idle)",
           },
         });
       }
@@ -167,10 +167,10 @@ export const WakelockPlugin: Plugin = async ({ client }) => {
         release(sessionID);
         await client.app.log({
           body: {
-            service: "wakelock",
             level: "info",
-            message: "Released wakelock (session error)",
+            service: "wakelock",
             extra: { sessionID },
+            message: "Released wakelock (session error)",
           },
         });
       }
