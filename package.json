@@ -6,6 +6,15 @@
   "type": "module",
   "keywords": ["opencode", "plugin", "caffeinate", "macos", "wakelock", "sleep"],
   "license": "MIT",
+  "author": "",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/YOUR_USERNAME/opencode-wakelock.git"
+  },
+  "bugs": {
+    "url": "https://github.com/YOUR_USERNAME/opencode-wakelock/issues"
+  },
+  "homepage": "https://github.com/YOUR_USERNAME/opencode-wakelock#readme",
   "devDependencies": {
     "@opencode-ai/plugin": "latest"
   }
