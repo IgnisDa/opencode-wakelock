@@ -102,19 +102,70 @@ function startupCleanup() {
   }
 }
 
-export const WakelockPlugin: Plugin = async () => {
+export const WakelockPlugin: Plugin = async ({ client }) => {
+  await client.app.log({
+    body: {
+      service: "wakelock",
+      level: "info",
+      message: "Plugin initializing",
+      extra: { platform: process.platform, pid: process.pid },
+    },
+  });
+
   startupCleanup();
+
+  await client.app.log({
+    body: {
+      service: "wakelock",
+      level: "info",
+      message: "Startup cleanup complete",
+    },
+  });
 
   return {
     event: async ({ event }) => {
+      await client.app.log({
+        body: {
+          service: "wakelock",
+          level: "debug",
+          message: "Event received",
+          extra: { type: event.type },
+        },
+      });
+
       if (event.type !== "session.status") return;
 
       const { sessionID, status } = (event as any).properties;
 
+      await client.app.log({
+        body: {
+          service: "wakelock",
+          level: "info",
+          message: "Session status changed",
+          extra: { sessionID, status },
+        },
+      });
+
       if (status === "active") {
         acquire(sessionID);
+        await client.app.log({
+          body: {
+            service: "wakelock",
+            level: "info",
+            message: "Acquired wakelock",
+            extra: { sessionID },
+          },
+        });
       } else if (status === "idle" || status === "error") {
         release(sessionID);
+        await client.app.log({
+          body: {
+            service: "wakelock",
+            level: "info",
+            message: "Released wakelock",
+            extra: { sessionID },
+          },
+        });
       }
     },
   };
