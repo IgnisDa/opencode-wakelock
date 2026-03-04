@@ -16,12 +16,12 @@
   "author": "ignisda",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ignisda/opencode-wakelock.git"
+    "url": "git+https://github.com/IgnisDa/opencode-wakelock.git"
   },
   "bugs": {
-    "url": "https://github.com/ignisda/opencode-wakelock/issues"
+    "url": "https://github.com/IgnisDa/opencode-wakelock/issues"
   },
-  "homepage": "https://github.com/ignisda/opencode-wakelock#readme",
+  "homepage": "https://github.com/IgnisDa/opencode-wakelock#readme",
   "devDependencies": {
     "@opencode-ai/plugin": "latest",
     "bun-types": "latest"
