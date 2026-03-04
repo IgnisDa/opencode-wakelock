@@ -7,6 +7,7 @@ parallel OpenCode instances.
 ## How it works
 
 Hooks into the `session.status` event:
+
 - `status: "active"` → registers the session and ensures `caffeinate -i` is running
 - `status: "idle"` or `"error"` → deregisters the session; stops caffeinate when no sessions remain active
 
