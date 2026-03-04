@@ -20,7 +20,8 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '22'
-          registry-url: 'https://registry.npmjs.org'
+          # Do NOT set registry-url - it creates .npmrc with token auth
+          # We want OIDC authentication instead
 
       - name: Upgrade npm for OIDC support
         run: npm install -g npm@latest
