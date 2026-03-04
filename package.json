@@ -23,6 +23,7 @@
   },
   "homepage": "https://github.com/ignisda/opencode-wakelock#readme",
   "devDependencies": {
-    "@opencode-ai/plugin": "latest"
+    "@opencode-ai/plugin": "latest",
+    "bun-types": "latest"
   }
 }
