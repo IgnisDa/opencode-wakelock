@@ -4,7 +4,14 @@
   "description": "Prevent macOS from sleeping while OpenCode agent is active",
   "main": "index.ts",
   "type": "module",
-  "keywords": ["opencode", "plugin", "caffeinate", "macos", "wakelock", "sleep"],
+  "keywords": [
+    "opencode",
+    "plugin",
+    "caffeinate",
+    "macos",
+    "wakelock",
+    "sleep"
+  ],
   "license": "MIT",
   "author": "ignisda",
   "repository": {
