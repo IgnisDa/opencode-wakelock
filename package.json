@@ -1,29 +1,29 @@
 {
-  "name": "opencode-wakelock",
-  "version": "0.1.4",
-  "description": "Prevent macOS from sleeping while OpenCode agent is active",
-  "main": "index.ts",
   "type": "module",
-  "keywords": [
-    "opencode",
-    "plugin",
-    "caffeinate",
-    "macos",
-    "wakelock",
-    "sleep"
-  ],
   "license": "MIT",
+  "main": "index.ts",
+  "version": "0.1.4",
   "author": "ignisda",
+  "name": "opencode-wakelock",
+  "homepage": "https://github.com/IgnisDa/opencode-wakelock#readme",
+  "description": "Prevent macOS from sleeping while OpenCode agent is active",
+  "bugs": {
+    "url": "https://github.com/IgnisDa/opencode-wakelock/issues"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/IgnisDa/opencode-wakelock.git"
   },
-  "bugs": {
-    "url": "https://github.com/IgnisDa/opencode-wakelock/issues"
-  },
-  "homepage": "https://github.com/IgnisDa/opencode-wakelock#readme",
   "devDependencies": {
     "@opencode-ai/plugin": "latest",
     "bun-types": "latest"
-  }
+  },
+  "keywords": [
+    "sleep",
+    "macos",
+    "plugin",
+    "opencode",
+    "wakelock",
+    "caffeinate"
+  ]
 }
