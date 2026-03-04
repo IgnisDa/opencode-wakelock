@@ -133,36 +133,43 @@ export const WakelockPlugin: Plugin = async ({ client }) => {
         },
       });
 
-      if (event.type !== "session.status") return;
-
-      const { sessionID, status } = (event as any).properties;
-
-      await client.app.log({
-        body: {
-          service: "wakelock",
-          level: "info",
-          message: "Session status changed",
-          extra: { sessionID, status },
-        },
-      });
-
-      if (status === "active") {
+      // Handle session becoming busy (actively working)
+      if (event.type === "session.status" && event.properties.status.type === "busy") {
+        const { sessionID } = (event as any).properties;
         acquire(sessionID);
         await client.app.log({
           body: {
             service: "wakelock",
             level: "info",
-            message: "Acquired wakelock",
+            message: "Acquired wakelock (session busy)",
             extra: { sessionID },
           },
         });
-      } else if (status === "idle" || status === "error") {
+      }
+
+      // Handle session becoming idle (completed)
+      if (event.type === "session.idle") {
+        const { sessionID } = (event as any).properties;
         release(sessionID);
         await client.app.log({
           body: {
             service: "wakelock",
             level: "info",
-            message: "Released wakelock",
+            message: "Released wakelock (session idle)",
+            extra: { sessionID },
+          },
+        });
+      }
+
+      // Handle session error
+      if (event.type === "session.error") {
+        const { sessionID } = (event as any).properties;
+        release(sessionID);
+        await client.app.log({
+          body: {
+            service: "wakelock",
+            level: "info",
+            message: "Released wakelock (session error)",
             extra: { sessionID },
           },
         });

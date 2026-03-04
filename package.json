@@ -1,6 +1,6 @@
 {
   "name": "opencode-wakelock",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Prevent macOS from sleeping while OpenCode agent is active",
   "main": "index.ts",
   "type": "module",
