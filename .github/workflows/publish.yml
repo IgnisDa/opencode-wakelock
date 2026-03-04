@@ -5,15 +5,22 @@ on:
     branches:
       - main
 
+permissions:
+  id-token: write  # Required for OIDC trusted publishing
+  contents: read
+
 jobs:
   publish:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v1
@@ -23,15 +30,11 @@ jobs:
       - name: Install dependencies
         run: bun install
 
-      - name: Setup npm authentication
-        run: |
-          echo "//registry.npmjs.org/:_authToken=${{ secrets.NPM_TOKEN }}" > ~/.npmrc
-
       - name: Check if version already published
         id: check
         run: |
-          PACKAGE_NAME=$(bun run -e "console.log(require('./package.json').name)")
-          PACKAGE_VERSION=$(bun run -e "console.log(require('./package.json').version)")
+          PACKAGE_NAME=$(node -p "require('./package.json').name")
+          PACKAGE_VERSION=$(node -p "require('./package.json').version")
           if npm view "$PACKAGE_NAME@$PACKAGE_VERSION" version 2>/dev/null; then
             echo "Version $PACKAGE_VERSION already published"
             echo "should_publish=false" >> $GITHUB_OUTPUT
@@ -43,3 +46,4 @@ jobs:
       - name: Publish to npm
         if: steps.check.outputs.should_publish == 'true'
         run: npm publish --access public
+        # OIDC authentication is automatic - no token needed!
