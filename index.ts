@@ -102,7 +102,7 @@ function startupCleanup() {
 
 }
 
-export const WakelockPlugin: Plugin = async ({ client }) => {
+const wakelockPlugin: Plugin = async ({ client }) => {
   await client.app.log({
     body: {
       level: "info",
@@ -164,7 +164,7 @@ export const WakelockPlugin: Plugin = async ({ client }) => {
       // Handle session error
       if (event.type === "session.error") {
         const { sessionID } = (event as any).properties;
-        release(sessionID);
+        if (sessionID) release(sessionID);
         await client.app.log({
           body: {
             level: "info",
@@ -178,4 +178,4 @@ export const WakelockPlugin: Plugin = async ({ client }) => {
   };
 };
 
-export default WakelockPlugin;
+export default { server: wakelockPlugin };

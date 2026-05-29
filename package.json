@@ -2,7 +2,10 @@
   "type": "module",
   "license": "MIT",
   "main": "index.ts",
-  "version": "0.1.4",
+  "version": "0.1.5",
+  "engines": {
+    "opencode": ">=1.14.0"
+  },
   "author": "ignisda",
   "name": "opencode-wakelock",
   "homepage": "https://github.com/IgnisDa/opencode-wakelock#readme",
