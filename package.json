@@ -2,14 +2,14 @@
   "type": "module",
   "license": "MIT",
   "main": "index.ts",
-  "version": "0.1.5",
+  "version": "0.2.0",
   "engines": {
     "opencode": ">=1.14.0"
   },
   "author": "ignisda",
   "name": "opencode-wakelock",
   "homepage": "https://github.com/IgnisDa/opencode-wakelock#readme",
-  "description": "Prevent macOS from sleeping while OpenCode agent is active",
+  "description": "Prevent the system from sleeping while OpenCode agent is active (macOS + Linux)",
   "bugs": {
     "url": "https://github.com/IgnisDa/opencode-wakelock/issues"
   },
@@ -23,10 +23,15 @@
   },
   "keywords": [
     "sleep",
-    "macos",
+    "wakelock",
     "plugin",
     "opencode",
-    "wakelock",
-    "caffeinate"
+    "macos",
+    "linux",
+    "caffeinate",
+    "systemd-inhibit",
+    "fedora",
+    "plasma",
+    "kde"
   ]
 }

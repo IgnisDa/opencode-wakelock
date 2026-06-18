@@ -10,7 +10,42 @@ import {
 
 const TMP_DIR = "/tmp/opencode-wakelock";
 const SESSIONS_DIR = `${TMP_DIR}/sessions`;
-const CAFFEINATE_PID_FILE = `${TMP_DIR}/caffeinate.pid`;
+const LOCK_PID_FILE = `${TMP_DIR}/lock.pid`;
+
+type SupportedPlatform = "darwin" | "linux";
+
+type LogFn = (
+  level: "info" | "warn" | "debug",
+  message: string,
+  extra?: Record<string, unknown>,
+) => Promise<void>;
+
+function detectPlatform(): SupportedPlatform | null {
+  if (process.platform === "darwin") return "darwin";
+  if (process.platform === "linux") return "linux";
+  return null;
+}
+
+interface InhibitorCommand {
+  command: string;
+  args: string[];
+}
+
+function getInhibitorCommand(platform: SupportedPlatform): InhibitorCommand {
+  if (platform === "darwin") {
+    return { command: "caffeinate", args: ["-i"] };
+  }
+  return {
+    command: "systemd-inhibit",
+    args: [
+      "--what=sleep:idle",
+      "--who=opencode-wakelock",
+      "--why=OpenCode session is active",
+      "sleep",
+      "infinity",
+    ],
+  };
+}
 
 function isProcessAlive(pid: number): boolean {
   try {
@@ -33,149 +68,121 @@ function getActiveSessions(): string[] {
     const filePath = `${SESSIONS_DIR}/${sessionID}`;
     try {
       const pid = parseInt(readFileSync(filePath, "utf8").trim(), 10);
-      if (isProcessAlive(pid))
-        active.push(sessionID);
-       else
-        unlinkSync(filePath);
-
+      if (isProcessAlive(pid)) active.push(sessionID);
+      else unlinkSync(filePath);
     } catch {}
   }
   return active;
 }
 
-function isCaffeinateRunning(): boolean {
-  if (!existsSync(CAFFEINATE_PID_FILE)) return false;
+function isLockRunning(): boolean {
+  if (!existsSync(LOCK_PID_FILE)) return false;
   try {
-    const pid = parseInt(readFileSync(CAFFEINATE_PID_FILE, "utf8").trim(), 10);
+    const pid = parseInt(readFileSync(LOCK_PID_FILE, "utf8").trim(), 10);
     if (isProcessAlive(pid)) return true;
-    unlinkSync(CAFFEINATE_PID_FILE);
+    unlinkSync(LOCK_PID_FILE);
     return false;
   } catch {
     return false;
   }
 }
 
-function startCaffeinate() {
-  const proc = Bun.spawn(["caffeinate", "-i"], {
-    stdio: ["ignore", "ignore", "ignore"],
-  });
-  writeFileSync(CAFFEINATE_PID_FILE, String(proc.pid));
+function startLock(platform: SupportedPlatform, log: LogFn): boolean {
+  const cmd = getInhibitorCommand(platform);
+  try {
+    const proc = Bun.spawn([cmd.command, ...cmd.args], {
+      stdio: ["ignore", "ignore", "ignore"],
+    });
+    writeFileSync(LOCK_PID_FILE, String(proc.pid));
+    return true;
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : String(e);
+    log("warn", `Failed to start ${cmd.command}`, {
+      platform,
+      command: cmd.command,
+      error: message,
+    });
+    return false;
+  }
 }
 
-function stopCaffeinate() {
-  if (!existsSync(CAFFEINATE_PID_FILE)) return;
+function stopLock() {
+  if (!existsSync(LOCK_PID_FILE)) return;
   try {
-    const pid = parseInt(readFileSync(CAFFEINATE_PID_FILE, "utf8").trim(), 10);
+    const pid = parseInt(readFileSync(LOCK_PID_FILE, "utf8").trim(), 10);
     process.kill(pid, "SIGTERM");
   } catch {}
   try {
-    unlinkSync(CAFFEINATE_PID_FILE);
+    unlinkSync(LOCK_PID_FILE);
   } catch {}
 }
 
-function acquire(sessionID: string) {
-  if (process.platform !== "darwin") return;
+function acquire(sessionID: string, platform: SupportedPlatform, log: LogFn) {
   ensureDirs();
   writeFileSync(`${SESSIONS_DIR}/${sessionID}`, String(process.pid));
-  if (!isCaffeinateRunning())
-    startCaffeinate();
-
+  if (!isLockRunning()) startLock(platform, log);
 }
 
 function release(sessionID: string) {
-  if (process.platform !== "darwin") return;
   try {
     unlinkSync(`${SESSIONS_DIR}/${sessionID}`);
   } catch {}
   const remaining = getActiveSessions();
-  if (remaining.length === 0)
-    stopCaffeinate();
-
+  if (remaining.length === 0) stopLock();
 }
 
 function startupCleanup() {
-  if (process.platform !== "darwin") return;
   ensureDirs();
   const active = getActiveSessions();
-  if (active.length === 0)
-    stopCaffeinate();
-
+  if (active.length === 0) stopLock();
 }
 
 const wakelockPlugin: Plugin = async ({ client }) => {
-  await client.app.log({
-    body: {
-      level: "info",
-      service: "wakelock",
-      message: "Plugin initializing",
-      extra: { platform: process.platform, pid: process.pid },
-    },
+  const platform = detectPlatform();
+
+  const log: LogFn = async (level, message, extra) => {
+    await client.app.log({
+      body: { level, service: "wakelock", message, extra },
+    });
+  };
+
+  await log("info", "Plugin initializing", {
+    platform: process.platform,
+    pid: process.pid,
   });
+
+  if (platform === null) {
+    await log("info", "Plugin inactive (unsupported platform)");
+    return {};
+  }
 
   startupCleanup();
 
-  await client.app.log({
-    body: {
-      level: "info",
-      service: "wakelock",
-      message: "Startup cleanup complete",
-    },
-  });
+  await log("info", "Startup cleanup complete", { platform });
 
   return {
     event: async ({ event }) => {
-      await client.app.log({
-        body: {
-          level: "debug",
-          service: "wakelock",
-          message: "Event received",
-          extra: { type: event.type },
-        },
-      });
+      await log("debug", "Event received", { type: event.type });
 
-      // Handle session becoming busy (actively working)
       if (event.type === "session.status" && event.properties.status.type === "busy") {
         const { sessionID } = (event as any).properties;
-        acquire(sessionID);
-        await client.app.log({
-          body: {
-            level: "info",
-            service: "wakelock",
-            extra: { sessionID },
-            message: "Acquired wakelock (session busy)",
-          },
-        });
+        acquire(sessionID, platform, log);
+        await log("info", "Acquired wakelock (session busy)", { sessionID });
       }
 
-      // Handle session becoming idle (completed)
       if (event.type === "session.idle") {
         const { sessionID } = (event as any).properties;
         release(sessionID);
-        await client.app.log({
-          body: {
-            level: "info",
-            service: "wakelock",
-            extra: { sessionID },
-            message: "Released wakelock (session idle)",
-          },
-        });
+        await log("info", "Released wakelock (session idle)", { sessionID });
       }
 
-      // Handle session error
       if (event.type === "session.error") {
         const { sessionID } = (event as any).properties;
         if (sessionID) release(sessionID);
-        await client.app.log({
-          body: {
-            level: "info",
-            service: "wakelock",
-            extra: { sessionID },
-            message: "Released wakelock (session error)",
-          },
-        });
+        await log("info", "Released wakelock (session error)", { sessionID });
       }
     },
   };
 };
 
-export default { server: wakelockPlugin };
+export default { id: "opencode-wakelock", server: wakelockPlugin };
