@@ -12,6 +12,11 @@ const TMP_DIR = "/tmp/opencode-wakelock";
 const SESSIONS_DIR = `${TMP_DIR}/sessions`;
 const CAFFEINATE_PID_FILE = `${TMP_DIR}/caffeinate.pid`;
 
+type CaffeinateProcess = {
+  pid: number;
+  startedAt?: string;
+};
+
 function isProcessAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -19,6 +24,43 @@ function isProcessAlive(pid: number): boolean {
   } catch {
     return false;
   }
+}
+
+function getProcessInfo(pid: number) {
+  const result = Bun.spawnSync([
+    "ps", "-p", String(pid), "-o", "comm=", "-o", "ppid=", "-o", "lstart=",
+  ]);
+  const match = result.stdout.toString().trim().match(/^(\S+)\s+(\d+)\s+(.+)$/);
+  if (result.exitCode !== 0 || !match) return;
+  return { command: match[1], parentPid: Number(match[2]), startedAt: match[3] };
+}
+
+function readCaffeinateProcess(): CaffeinateProcess | undefined {
+  if (!existsSync(CAFFEINATE_PID_FILE)) return;
+  const contents = readFileSync(CAFFEINATE_PID_FILE, "utf8").trim();
+  try {
+    const stored = JSON.parse(contents) as CaffeinateProcess | number;
+    if (typeof stored === "number")
+      return Number.isInteger(stored) && stored > 0 ? { pid: stored } : undefined;
+    if (stored && Number.isInteger(stored.pid) && stored.pid > 0) return stored;
+  } catch {
+    const pid = Number(contents);
+    if (Number.isInteger(pid) && pid > 0) return { pid };
+  }
+}
+
+function isCaffeinateProcess(stored: CaffeinateProcess): boolean {
+  const info = getProcessInfo(stored.pid);
+  if (!info || info.command !== "caffeinate") return false;
+  if (stored.startedAt) return stored.startedAt === info.startedAt;
+
+  // Migrate legacy PID-only files only when caffeinate is owned by OpenCode.
+  if (getProcessInfo(info.parentPid)?.command !== "opencode") return false;
+  writeFileSync(CAFFEINATE_PID_FILE, JSON.stringify({
+    pid: stored.pid,
+    startedAt: info.startedAt,
+  }));
+  return true;
 }
 
 function ensureDirs() {
@@ -44,10 +86,9 @@ function getActiveSessions(): string[] {
 }
 
 function isCaffeinateRunning(): boolean {
-  if (!existsSync(CAFFEINATE_PID_FILE)) return false;
   try {
-    const pid = parseInt(readFileSync(CAFFEINATE_PID_FILE, "utf8").trim(), 10);
-    if (isProcessAlive(pid)) return true;
+    const stored = readCaffeinateProcess();
+    if (stored && isCaffeinateProcess(stored)) return true;
     unlinkSync(CAFFEINATE_PID_FILE);
     return false;
   } catch {
@@ -59,14 +100,24 @@ function startCaffeinate() {
   const proc = Bun.spawn(["caffeinate", "-i"], {
     stdio: ["ignore", "ignore", "ignore"],
   });
-  writeFileSync(CAFFEINATE_PID_FILE, String(proc.pid));
+  const info = getProcessInfo(proc.pid);
+  if (!info) {
+    proc.kill();
+    return;
+  }
+  writeFileSync(CAFFEINATE_PID_FILE, JSON.stringify({
+    pid: proc.pid,
+    startedAt: info.startedAt,
+  }));
 }
 
 function stopCaffeinate() {
   if (!existsSync(CAFFEINATE_PID_FILE)) return;
   try {
-    const pid = parseInt(readFileSync(CAFFEINATE_PID_FILE, "utf8").trim(), 10);
-    process.kill(pid, "SIGTERM");
+    const stored = readCaffeinateProcess();
+    // A stale PID file may point to an unrelated process after PID reuse.
+    if (stored && isCaffeinateProcess(stored))
+      process.kill(stored.pid, "SIGTERM");
   } catch {}
   try {
     unlinkSync(CAFFEINATE_PID_FILE);
