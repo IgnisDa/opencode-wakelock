@@ -14,6 +14,7 @@ const CAFFEINATE_PID_FILE = `${TMP_DIR}/caffeinate.pid`;
 
 type CaffeinateProcess = {
   pid: number;
+  // Absent only in PID files written by releases through 0.1.5.
   startedAt?: string;
 };
 
@@ -27,6 +28,7 @@ function isProcessAlive(pid: number): boolean {
 }
 
 function getProcessInfo(pid: number) {
+  // macOS can reuse a live PID, so start time is required for process identity.
   const result = Bun.spawnSync([
     "ps", "-p", String(pid), "-o", "comm=", "-o", "ppid=", "-o", "lstart=",
   ]);
@@ -39,6 +41,7 @@ function readCaffeinateProcess(): CaffeinateProcess | undefined {
   if (!existsSync(CAFFEINATE_PID_FILE)) return;
   const contents = readFileSync(CAFFEINATE_PID_FILE, "utf8").trim();
   try {
+    // Accept the PID-only format long enough to migrate existing installations.
     const stored = JSON.parse(contents) as CaffeinateProcess | number;
     if (typeof stored === "number")
       return Number.isInteger(stored) && stored > 0 ? { pid: stored } : undefined;
@@ -102,6 +105,7 @@ function startCaffeinate() {
   });
   const info = getProcessInfo(proc.pid);
   if (!info) {
+    // Do not leave an inhibitor running when it cannot be tracked safely.
     proc.kill();
     return;
   }
