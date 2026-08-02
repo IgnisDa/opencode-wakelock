@@ -7,6 +7,7 @@ import {
   writeFileSync,
   unlinkSync,
 } from "fs";
+import { spawn } from "child_process";
 
 const TMP_DIR = "/tmp/opencode-wakelock";
 const SESSIONS_DIR = `${TMP_DIR}/sessions`;
@@ -89,19 +90,42 @@ function isLockRunning(): boolean {
 
 function startLock(platform: SupportedPlatform, log: LogFn): boolean {
   const cmd = getInhibitorCommand(platform);
-  try {
-    const proc = Bun.spawn([cmd.command, ...cmd.args], {
-      stdio: ["ignore", "ignore", "ignore"],
-    });
-    writeFileSync(LOCK_PID_FILE, String(proc.pid));
-    return true;
-  } catch (e: unknown) {
+  const reportFailure = (e: unknown) => {
     const message = e instanceof Error ? e.message : String(e);
-    log("warn", `Failed to start ${cmd.command}`, {
+    void log("warn", `Failed to start ${cmd.command}`, {
       platform,
       command: cmd.command,
       error: message,
+    }).catch(() => {});
+  };
+
+  try {
+    const proc = spawn(cmd.command, cmd.args, { stdio: "ignore" });
+    proc.once("error", (e) => {
+      try {
+        if (
+          proc.pid !== undefined &&
+          existsSync(LOCK_PID_FILE) &&
+          readFileSync(LOCK_PID_FILE, "utf8").trim() === String(proc.pid)
+        ) {
+          unlinkSync(LOCK_PID_FILE);
+        }
+      } catch {}
+      reportFailure(e);
     });
+
+    if (proc.pid === undefined) return false;
+    try {
+      writeFileSync(LOCK_PID_FILE, String(proc.pid));
+      proc.unref();
+      return true;
+    } catch (e) {
+      proc.kill();
+      reportFailure(e);
+      return false;
+    }
+  } catch (e) {
+    reportFailure(e);
     return false;
   }
 }
@@ -117,10 +141,11 @@ function stopLock() {
   } catch {}
 }
 
-function acquire(sessionID: string, platform: SupportedPlatform, log: LogFn) {
+function acquire(sessionID: string, platform: SupportedPlatform, log: LogFn): boolean {
   ensureDirs();
   writeFileSync(`${SESSIONS_DIR}/${sessionID}`, String(process.pid));
-  if (!isLockRunning()) startLock(platform, log);
+  if (isLockRunning()) return true;
+  return startLock(platform, log);
 }
 
 function release(sessionID: string) {
@@ -166,8 +191,9 @@ const wakelockPlugin: Plugin = async ({ client }) => {
 
       if (event.type === "session.status" && event.properties.status.type === "busy") {
         const { sessionID } = (event as any).properties;
-        acquire(sessionID, platform, log);
-        await log("info", "Acquired wakelock (session busy)", { sessionID });
+        if (acquire(sessionID, platform, log)) {
+          await log("info", "Acquired wakelock (session busy)", { sessionID });
+        }
       }
 
       if (event.type === "session.idle") {
