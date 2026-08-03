@@ -2,7 +2,7 @@
   "type": "module",
   "license": "MIT",
   "main": "index.ts",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "engines": {
     "opencode": ">=1.14.0"
   },
