@@ -7,11 +7,12 @@ import {
   writeFileSync,
   unlinkSync,
 } from "fs";
-import { spawn } from "child_process";
+import { spawn, spawnSync } from "child_process";
 
 const TMP_DIR = "/tmp/opencode-wakelock";
 const SESSIONS_DIR = `${TMP_DIR}/sessions`;
 const LOCK_PID_FILE = `${TMP_DIR}/lock.pid`;
+const LEGACY_CAFFEINATE_PID_FILE = `${TMP_DIR}/caffeinate.pid`;
 
 type SupportedPlatform = "darwin" | "linux";
 
@@ -48,6 +49,12 @@ function getInhibitorCommand(platform: SupportedPlatform): InhibitorCommand {
   };
 }
 
+type CaffeinateProcess = {
+  pid: number;
+  // Absent only in PID files written by releases through 0.1.5.
+  startedAt?: string;
+};
+
 function isProcessAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -55,6 +62,53 @@ function isProcessAlive(pid: number): boolean {
   } catch {
     return false;
   }
+}
+
+function getProcessInfo(pid: number) {
+  // macOS can reuse a live PID, so start time is required for process identity.
+  const result = spawnSync(
+    "ps",
+    ["-p", String(pid), "-o", "comm=", "-o", "ppid=", "-o", "lstart="],
+    { encoding: "utf8" },
+  );
+  const match = result.stdout.trim().match(/^(\S+)\s+(\d+)\s+(.+)$/);
+  if (result.status !== 0 || !match) return;
+  return { command: match[1], parentPid: Number(match[2]), startedAt: match[3] };
+}
+
+function readCaffeinateProcess(): CaffeinateProcess | undefined {
+  const pidFile = existsSync(LOCK_PID_FILE)
+    ? LOCK_PID_FILE
+    : LEGACY_CAFFEINATE_PID_FILE;
+  if (!existsSync(pidFile)) return;
+  const contents = readFileSync(pidFile, "utf8").trim();
+  try {
+    // Accept the PID-only format long enough to migrate existing installations.
+    const stored = JSON.parse(contents) as CaffeinateProcess | number;
+    if (typeof stored === "number")
+      return Number.isInteger(stored) && stored > 0 ? { pid: stored } : undefined;
+    if (stored && Number.isInteger(stored.pid) && stored.pid > 0) return stored;
+  } catch {
+    const pid = Number(contents);
+    if (Number.isInteger(pid) && pid > 0) return { pid };
+  }
+}
+
+function isCaffeinateProcess(stored: CaffeinateProcess): boolean {
+  const info = getProcessInfo(stored.pid);
+  if (!info || info.command !== "caffeinate") return false;
+  if (stored.startedAt) return stored.startedAt === info.startedAt;
+
+  // Migrate legacy PID-only files only when caffeinate is owned by OpenCode.
+  if (getProcessInfo(info.parentPid)?.command !== "opencode") return false;
+  writeFileSync(LOCK_PID_FILE, JSON.stringify({
+    pid: stored.pid,
+    startedAt: info.startedAt,
+  }));
+  try {
+    unlinkSync(LEGACY_CAFFEINATE_PID_FILE);
+  } catch {}
+  return true;
 }
 
 function ensureDirs() {
@@ -76,7 +130,19 @@ function getActiveSessions(): string[] {
   return active;
 }
 
-function isLockRunning(): boolean {
+function isLockRunning(platform: SupportedPlatform): boolean {
+  if (platform === "darwin") {
+    try {
+      const stored = readCaffeinateProcess();
+      if (stored && isCaffeinateProcess(stored)) return true;
+      unlinkSync(LOCK_PID_FILE);
+    } catch {}
+    try {
+      unlinkSync(LEGACY_CAFFEINATE_PID_FILE);
+    } catch {}
+    return false;
+  }
+
   if (!existsSync(LOCK_PID_FILE)) return false;
   try {
     const pid = parseInt(readFileSync(LOCK_PID_FILE, "utf8").trim(), 10);
@@ -103,11 +169,10 @@ function startLock(platform: SupportedPlatform, log: LogFn): boolean {
     const proc = spawn(cmd.command, cmd.args, { stdio: "ignore" });
     proc.once("error", (e) => {
       try {
-        if (
-          proc.pid !== undefined &&
-          existsSync(LOCK_PID_FILE) &&
-          readFileSync(LOCK_PID_FILE, "utf8").trim() === String(proc.pid)
-        ) {
+        const storedPid = platform === "darwin"
+          ? readCaffeinateProcess()?.pid
+          : Number(readFileSync(LOCK_PID_FILE, "utf8").trim());
+        if (proc.pid !== undefined && storedPid === proc.pid) {
           unlinkSync(LOCK_PID_FILE);
         }
       } catch {}
@@ -116,7 +181,20 @@ function startLock(platform: SupportedPlatform, log: LogFn): boolean {
 
     if (proc.pid === undefined) return false;
     try {
-      writeFileSync(LOCK_PID_FILE, String(proc.pid));
+      if (platform === "darwin") {
+        const info = getProcessInfo(proc.pid);
+        if (!info) {
+          // Do not leave an inhibitor running when it cannot be tracked safely.
+          proc.kill();
+          return false;
+        }
+        writeFileSync(LOCK_PID_FILE, JSON.stringify({
+          pid: proc.pid,
+          startedAt: info.startedAt,
+        }));
+      } else {
+        writeFileSync(LOCK_PID_FILE, String(proc.pid));
+      }
       proc.unref();
       return true;
     } catch (e) {
@@ -130,7 +208,23 @@ function startLock(platform: SupportedPlatform, log: LogFn): boolean {
   }
 }
 
-function stopLock() {
+function stopLock(platform: SupportedPlatform) {
+  if (platform === "darwin") {
+    try {
+      const stored = readCaffeinateProcess();
+      // A stale PID file may point to an unrelated process after PID reuse.
+      if (stored && isCaffeinateProcess(stored))
+        process.kill(stored.pid, "SIGTERM");
+    } catch {}
+    try {
+      unlinkSync(LOCK_PID_FILE);
+    } catch {}
+    try {
+      unlinkSync(LEGACY_CAFFEINATE_PID_FILE);
+    } catch {}
+    return;
+  }
+
   if (!existsSync(LOCK_PID_FILE)) return;
   try {
     const pid = parseInt(readFileSync(LOCK_PID_FILE, "utf8").trim(), 10);
@@ -144,22 +238,22 @@ function stopLock() {
 function acquire(sessionID: string, platform: SupportedPlatform, log: LogFn): boolean {
   ensureDirs();
   writeFileSync(`${SESSIONS_DIR}/${sessionID}`, String(process.pid));
-  if (isLockRunning()) return true;
+  if (isLockRunning(platform)) return true;
   return startLock(platform, log);
 }
 
-function release(sessionID: string) {
+function release(sessionID: string, platform: SupportedPlatform) {
   try {
     unlinkSync(`${SESSIONS_DIR}/${sessionID}`);
   } catch {}
   const remaining = getActiveSessions();
-  if (remaining.length === 0) stopLock();
+  if (remaining.length === 0) stopLock(platform);
 }
 
-function startupCleanup() {
+function startupCleanup(platform: SupportedPlatform) {
   ensureDirs();
   const active = getActiveSessions();
-  if (active.length === 0) stopLock();
+  if (active.length === 0) stopLock(platform);
 }
 
 const wakelockPlugin: Plugin = async ({ client }) => {
@@ -181,7 +275,7 @@ const wakelockPlugin: Plugin = async ({ client }) => {
     return {};
   }
 
-  startupCleanup();
+  startupCleanup(platform);
 
   await log("info", "Startup cleanup complete", { platform });
 
@@ -198,13 +292,13 @@ const wakelockPlugin: Plugin = async ({ client }) => {
 
       if (event.type === "session.idle") {
         const { sessionID } = (event as any).properties;
-        release(sessionID);
+        release(sessionID, platform);
         await log("info", "Released wakelock (session idle)", { sessionID });
       }
 
       if (event.type === "session.error") {
         const { sessionID } = (event as any).properties;
-        if (sessionID) release(sessionID);
+        if (sessionID) release(sessionID, platform);
         await log("info", "Released wakelock (session error)", { sessionID });
       }
     },
