@@ -7,6 +7,7 @@ import {
   writeFileSync,
   unlinkSync,
 } from "fs";
+import { spawn, spawnSync } from "child_process";
 
 const TMP_DIR = "/tmp/opencode-wakelock";
 const SESSIONS_DIR = `${TMP_DIR}/sessions`;
@@ -65,11 +66,13 @@ function isProcessAlive(pid: number): boolean {
 
 function getProcessInfo(pid: number) {
   // macOS can reuse a live PID, so start time is required for process identity.
-  const result = Bun.spawnSync([
-    "ps", "-p", String(pid), "-o", "comm=", "-o", "ppid=", "-o", "lstart=",
-  ]);
-  const match = result.stdout.toString().trim().match(/^(\S+)\s+(\d+)\s+(.+)$/);
-  if (result.exitCode !== 0 || !match) return;
+  const result = spawnSync(
+    "ps",
+    ["-p", String(pid), "-o", "comm=", "-o", "ppid=", "-o", "lstart="],
+    { encoding: "utf8" },
+  );
+  const match = result.stdout.trim().match(/^(\S+)\s+(\d+)\s+(.+)$/);
+  if (result.status !== 0 || !match) return;
   return { command: match[1], parentPid: Number(match[2]), startedAt: match[3] };
 }
 
@@ -153,32 +156,54 @@ function isLockRunning(platform: SupportedPlatform): boolean {
 
 function startLock(platform: SupportedPlatform, log: LogFn): boolean {
   const cmd = getInhibitorCommand(platform);
-  try {
-    const proc = Bun.spawn([cmd.command, ...cmd.args], {
-      stdio: ["ignore", "ignore", "ignore"],
-    });
-    if (platform === "darwin") {
-      const info = getProcessInfo(proc.pid);
-      if (!info) {
-        // Do not leave an inhibitor running when it cannot be tracked safely.
-        proc.kill();
-        return false;
-      }
-      writeFileSync(LOCK_PID_FILE, JSON.stringify({
-        pid: proc.pid,
-        startedAt: info.startedAt,
-      }));
-    } else {
-      writeFileSync(LOCK_PID_FILE, String(proc.pid));
-    }
-    return true;
-  } catch (e: unknown) {
+  const reportFailure = (e: unknown) => {
     const message = e instanceof Error ? e.message : String(e);
-    log("warn", `Failed to start ${cmd.command}`, {
+    void log("warn", `Failed to start ${cmd.command}`, {
       platform,
       command: cmd.command,
       error: message,
+    }).catch(() => {});
+  };
+
+  try {
+    const proc = spawn(cmd.command, cmd.args, { stdio: "ignore" });
+    proc.once("error", (e) => {
+      try {
+        const storedPid = platform === "darwin"
+          ? readCaffeinateProcess()?.pid
+          : Number(readFileSync(LOCK_PID_FILE, "utf8").trim());
+        if (proc.pid !== undefined && storedPid === proc.pid) {
+          unlinkSync(LOCK_PID_FILE);
+        }
+      } catch {}
+      reportFailure(e);
     });
+
+    if (proc.pid === undefined) return false;
+    try {
+      if (platform === "darwin") {
+        const info = getProcessInfo(proc.pid);
+        if (!info) {
+          // Do not leave an inhibitor running when it cannot be tracked safely.
+          proc.kill();
+          return false;
+        }
+        writeFileSync(LOCK_PID_FILE, JSON.stringify({
+          pid: proc.pid,
+          startedAt: info.startedAt,
+        }));
+      } else {
+        writeFileSync(LOCK_PID_FILE, String(proc.pid));
+      }
+      proc.unref();
+      return true;
+    } catch (e) {
+      proc.kill();
+      reportFailure(e);
+      return false;
+    }
+  } catch (e) {
+    reportFailure(e);
     return false;
   }
 }
@@ -210,10 +235,11 @@ function stopLock(platform: SupportedPlatform) {
   } catch {}
 }
 
-function acquire(sessionID: string, platform: SupportedPlatform, log: LogFn) {
+function acquire(sessionID: string, platform: SupportedPlatform, log: LogFn): boolean {
   ensureDirs();
   writeFileSync(`${SESSIONS_DIR}/${sessionID}`, String(process.pid));
-  if (!isLockRunning(platform)) startLock(platform, log);
+  if (isLockRunning(platform)) return true;
+  return startLock(platform, log);
 }
 
 function release(sessionID: string, platform: SupportedPlatform) {
@@ -259,8 +285,9 @@ const wakelockPlugin: Plugin = async ({ client }) => {
 
       if (event.type === "session.status" && event.properties.status.type === "busy") {
         const { sessionID } = (event as any).properties;
-        acquire(sessionID, platform, log);
-        await log("info", "Acquired wakelock (session busy)", { sessionID });
+        if (acquire(sessionID, platform, log)) {
+          await log("info", "Acquired wakelock (session busy)", { sessionID });
+        }
       }
 
       if (event.type === "session.idle") {
