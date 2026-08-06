@@ -23,8 +23,8 @@
     "prepack": "npm run build"
   },
   "devDependencies": {
-    "@opencode-ai/plugin": "1.18.13",
-    "bun-types": "1.3.14",
+    "@opencode-ai/plugin": "latest",
+    "bun-types": "latest",
     "typescript": "7.0.2"
   },
   "keywords": [
