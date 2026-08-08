@@ -32,6 +32,14 @@ jobs:
       - name: Install dependencies
         run: bun install
 
+      - name: Verify package in Node
+        run: |
+          PACKAGE=$(npm pack --silent)
+          mkdir /tmp/opencode-wakelock-smoke
+          npm install --prefix /tmp/opencode-wakelock-smoke "$PWD/$PACKAGE"
+          cd /tmp/opencode-wakelock-smoke
+          node --input-type=module -e "const plugin = (await import('opencode-wakelock')).default; if (plugin.id !== 'opencode-wakelock' || typeof plugin.server !== 'function') process.exit(1)"
+
       - name: Check if version already published
         id: check
         run: |
