@@ -46,7 +46,18 @@ systemd-inhibit --list
 
 ## Install
 
-Add to your `opencode.json`:
+The package supports both OpenCode v1 and v2. Use the configuration key for
+the OpenCode version you run.
+
+OpenCode v2:
+
+```json
+{
+  "plugins": ["opencode-wakelock"]
+}
+```
+
+OpenCode v1:
 
 ```json
 {
