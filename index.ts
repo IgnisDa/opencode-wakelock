@@ -1,4 +1,8 @@
 import type { Plugin } from "@opencode-ai/plugin";
+import type {
+  Context as PluginContextV2,
+  Plugin as PluginV2,
+} from "@opencode/plugin/promise/plugin";
 import {
   existsSync,
   mkdirSync,
@@ -305,4 +309,85 @@ const wakelockPlugin: Plugin = async ({ client }) => {
   };
 };
 
-export default { id: "opencode-wakelock", server: wakelockPlugin };
+const wakelockPluginV2: PluginV2 = {
+  id: "opencode-wakelock",
+  async setup(ctx: PluginContextV2) {
+    const platform = detectPlatform();
+    if (platform === null) return;
+
+    startupCleanup(platform);
+
+    const log: LogFn = async (level, message, extra) => {
+      const details = extra ? ` ${JSON.stringify(extra)}` : "";
+      const line = `[opencode-wakelock] ${message}${details}`;
+      if (level === "warn") console.warn(line);
+      else if (level === "debug") console.debug(line);
+      else console.info(line);
+    };
+    const waitingSessions = new Set<string>();
+
+    const watchUntilIdle = (sessionID: string) => {
+      if (waitingSessions.has(sessionID)) return;
+      waitingSessions.add(sessionID);
+      void ctx.session.wait({ sessionID })
+        .catch(() => undefined)
+        .finally(() => {
+          waitingSessions.delete(sessionID);
+          release(sessionID, platform);
+        });
+    };
+
+    // The context hook is the reliable point at which a v2 model dispatch is
+    // active. session.wait() follows it through every terminal path, including
+    // cases where the public lifecycle stream does not emit an idle event.
+    await ctx.session.hook("context", (request) => {
+      acquire(request.sessionID, platform, log);
+      watchUntilIdle(request.sessionID);
+    });
+
+    const controller = new AbortController();
+    const watcher = (async () => {
+      try {
+        for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+          const data = "data" in event && event.data && typeof event.data === "object"
+            ? event.data as { sessionID?: string; status?: { type?: string } }
+            : undefined;
+          const sessionID = data?.sessionID;
+          if (!sessionID) continue;
+          if (event.type === "session.status" && data.status?.type === "busy") {
+            acquire(sessionID, platform, log);
+            watchUntilIdle(sessionID);
+          } else if (
+            event.type === "session.idle" ||
+            event.type === "session.execution.failed" ||
+            event.type === "session.execution.interrupted"
+          ) {
+            waitingSessions.delete(sessionID);
+            release(sessionID, platform);
+          }
+        }
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          await log("warn", "Event subscription stopped", {
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+    })();
+
+    return async () => {
+      controller.abort();
+      await watcher;
+      for (const sessionID of getActiveSessions()) {
+        const filePath = `${SESSIONS_DIR}/${sessionID}`;
+        try {
+          if (Number(readFileSync(filePath, "utf8").trim()) === process.pid) {
+            release(sessionID, platform);
+          }
+        } catch {}
+      }
+    };
+  },
+};
+
+export default { ...wakelockPluginV2, server: wakelockPlugin };

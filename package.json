@@ -3,7 +3,7 @@
   "license": "MIT",
   "main": "dist/index.js",
   "files": ["dist/index.js"],
-  "version": "0.2.3",
+  "version": "0.3.0",
   "engines": {
     "opencode": ">=1.14.0"
   },
@@ -23,6 +23,7 @@
     "prepack": "npm run build"
   },
   "devDependencies": {
+    "@opencode/plugin": "^2.0.3",
     "@opencode-ai/plugin": "latest",
     "bun-types": "latest",
     "typescript": "7.0.2"
