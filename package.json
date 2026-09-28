@@ -3,7 +3,7 @@
   "license": "MIT",
   "main": "dist/index.js",
   "files": ["dist/index.js"],
-  "version": "0.2.3",
+  "version": "0.3.0",
   "engines": {
     "opencode": ">=1.14.0"
   },
