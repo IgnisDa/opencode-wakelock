@@ -109,6 +109,7 @@ To release a new version, bump the `package.json` version and push to `main`.
 The workflow tests the package, publishes it to npm, then creates a GitHub release
 tagged `v<version>` with generated notes and a link to the npm package. The tag
 targets the published package's npm `gitHead`, not a later commit on `main`.
+The workflow waits for npm registry propagation before creating the GitHub release.
 
 The workflow uses the built-in `GITHUB_TOKEN`; no extra release token is needed.
 If the npm version or GitHub release already exists, that step is skipped, so

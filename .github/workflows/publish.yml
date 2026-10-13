@@ -80,14 +80,23 @@ jobs:
             exit 0
           fi
 
-          # Do not tag newer, unpublished changes when recovering a release.
-          PUBLISHED_COMMIT=$(npm view "$PACKAGE_NAME@$PACKAGE_VERSION" gitHead)
-          if [[ ! "$PUBLISHED_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "Cannot determine the published commit for $PACKAGE_NAME@$PACKAGE_VERSION" >&2
-            exit 1
-          fi
+          # npm can accept publication before registry reads see the version.
+          # Wait up to five minutes, including when recovering a partial run.
+          # Always tag the published commit, not newer, unpublished changes.
+          for attempt in {1..30}; do
+            if PUBLISHED_COMMIT=$(npm view "$PACKAGE_NAME@$PACKAGE_VERSION" gitHead --prefer-online) &&
+              [[ "$PUBLISHED_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+              break
+            fi
+            if [[ "$attempt" == 30 ]]; then
+              echo "Cannot determine the published commit for $PACKAGE_NAME@$PACKAGE_VERSION" >&2
+              exit 1
+            fi
+            echo "Waiting for npm registry propagation ($attempt/30)"
+            sleep 10
+          done
 
-          LATEST_VERSION=$(npm view "$PACKAGE_NAME" dist-tags.latest)
+          LATEST_VERSION=$(npm view "$PACKAGE_NAME" dist-tags.latest --prefer-online)
           RELEASE_FLAGS=()
           if [[ "$PACKAGE_VERSION" == *-* ]]; then
             RELEASE_FLAGS+=(--prerelease --latest=false)

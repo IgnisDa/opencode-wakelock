@@ -19,6 +19,8 @@ async function runRelease(options: Record<string, string> = {}) {
   await mkdir(root, { recursive: true });
   const directory = await mkdtemp(join(root, "wakelock-release-test-"));
   const argsFile = join(directory, "release-args");
+  const attemptsFile = join(directory, "npm-attempts");
+  const sleepsFile = join(directory, "sleeps");
   const scripts = {
     node: `#!/bin/bash
 if [[ "$*" == *".name"* ]]; then
@@ -29,13 +31,22 @@ fi
 `,
     npm: `#!/bin/bash
 if [[ "$*" == *"gitHead"* ]]; then
-  if [[ "$TEST_NPM_FAILURE" == true ]]; then
+  attempt=0
+  if [[ -f "$TEST_ATTEMPTS_FILE" ]]; then
+    read -r attempt < "$TEST_ATTEMPTS_FILE"
+  fi
+  attempt=$((attempt + 1))
+  printf '%s\\n' "$attempt" > "$TEST_ATTEMPTS_FILE"
+  if [[ "$TEST_NPM_FAILURE" == true || "$attempt" -le "$TEST_NPM_FAILURES" ]]; then
     exit 1
   fi
   printf '%s\\n' "$TEST_COMMIT"
 else
   printf '%s\\n' "$TEST_LATEST"
 fi
+`,
+    sleep: `#!/bin/bash
+printf '%s\\n' "$1" >> "$TEST_SLEEPS_FILE"
 `,
     gh: `#!/bin/bash
 if [[ "$2" == view ]]; then
@@ -60,7 +71,10 @@ fi
         TEST_VERSION: "0.3.0",
         TEST_LATEST: "0.3.0",
         TEST_COMMIT: publishedCommit,
+        TEST_NPM_FAILURES: "0",
         TEST_ARGS_FILE: argsFile,
+        TEST_ATTEMPTS_FILE: attemptsFile,
+        TEST_SLEEPS_FILE: sleepsFile,
         ...options,
       },
       stdout: "pipe",
@@ -74,7 +88,13 @@ fi
     const args = await Bun.file(argsFile).exists()
       ? (await Bun.file(argsFile).text()).trimEnd().split("\n")
       : [];
-    return { args, stdout, stderr, exitCode };
+    const attempts = await Bun.file(attemptsFile).exists()
+      ? Number(await Bun.file(attemptsFile).text())
+      : 0;
+    const sleeps = await Bun.file(sleepsFile).exists()
+      ? (await Bun.file(sleepsFile).text()).trimEnd().split("\n")
+      : [];
+    return { args, stdout, stderr, exitCode, attempts, sleeps };
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -134,6 +154,17 @@ test("npm lookup failure prevents release creation", async () => {
   const result = await runRelease({ TEST_NPM_FAILURE: "true" });
   expect(result.exitCode).not.toBe(0);
   expect(result.args).toEqual([]);
+  expect(result.attempts).toBe(30);
+  expect(result.sleeps).toHaveLength(29);
+});
+
+test("waits for a newly published npm version to become visible", async () => {
+  const result = await runRelease({ TEST_NPM_FAILURES: "2" });
+  expect(result.exitCode).toBe(0);
+  expect(result.attempts).toBe(3);
+  expect(result.sleeps).toEqual(["10", "10"]);
+  expect(result.args).toContain("create");
+  expect(result.args[result.args.indexOf("--target") + 1]).toBe(publishedCommit);
 });
 
 test("GitHub publication failure fails the workflow", async () => {
