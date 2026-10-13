@@ -106,9 +106,24 @@ jobs:
             RELEASE_FLAGS+=(--latest=false)
           fi
 
+          # Creating a release with an implicit tag at an older commit can
+          # require workflows:write, which GITHUB_TOKEN cannot request.
+          # Create the reference first, then publish against the existing tag.
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" >/dev/null 2>&1; then
+            TAG_COMMIT=$(gh api "repos/$GITHUB_REPOSITORY/commits/$TAG" --jq '.sha')
+            if [[ "$TAG_COMMIT" != "$PUBLISHED_COMMIT" ]]; then
+              echo "Existing tag $TAG does not match the published npm commit" >&2
+              exit 1
+            fi
+          else
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+              --raw-field "ref=refs/tags/$TAG" \
+              --raw-field "sha=$PUBLISHED_COMMIT"
+          fi
+
           gh release create "$TAG" \
             --repo "$GITHUB_REPOSITORY" \
-            --target "$PUBLISHED_COMMIT" \
+            --verify-tag \
             --title "$TAG" \
             --generate-notes \
             --notes "Published to npm: https://www.npmjs.com/package/$PACKAGE_NAME/v/$PACKAGE_VERSION" \

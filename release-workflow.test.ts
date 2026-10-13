@@ -19,6 +19,7 @@ async function runRelease(options: Record<string, string> = {}) {
   await mkdir(root, { recursive: true });
   const directory = await mkdtemp(join(root, "wakelock-release-test-"));
   const argsFile = join(directory, "release-args");
+  const tagArgsFile = join(directory, "tag-args");
   const attemptsFile = join(directory, "npm-attempts");
   const sleepsFile = join(directory, "sleeps");
   const scripts = {
@@ -49,7 +50,18 @@ fi
 printf '%s\\n' "$1" >> "$TEST_SLEEPS_FILE"
 `,
     gh: `#!/bin/bash
-if [[ "$2" == view ]]; then
+if [[ "$1" == api ]]; then
+  if [[ "$*" == *"/git/ref/tags/"* ]]; then
+    [[ "$TEST_TAG_EXISTS" == true ]]
+  elif [[ "$*" == *"/commits/"* ]]; then
+    printf '%s\\n' "$TEST_TAG_COMMIT"
+  else
+    printf '%s\\n' "$@" > "$TEST_TAG_ARGS_FILE"
+    if [[ "$TEST_TAG_FAILURE" == true ]]; then
+      exit 1
+    fi
+  fi
+elif [[ "$2" == view ]]; then
   [[ "$TEST_EXISTS" == true ]]
 else
   printf '%s\\n' "$@" > "$TEST_ARGS_FILE"
@@ -73,6 +85,8 @@ fi
         TEST_COMMIT: publishedCommit,
         TEST_NPM_FAILURES: "0",
         TEST_ARGS_FILE: argsFile,
+        TEST_TAG_ARGS_FILE: tagArgsFile,
+        TEST_TAG_COMMIT: publishedCommit,
         TEST_ATTEMPTS_FILE: attemptsFile,
         TEST_SLEEPS_FILE: sleepsFile,
         ...options,
@@ -94,7 +108,10 @@ fi
     const sleeps = await Bun.file(sleepsFile).exists()
       ? (await Bun.file(sleepsFile).text()).trimEnd().split("\n")
       : [];
-    return { args, stdout, stderr, exitCode, attempts, sleeps };
+    const tagArgs = await Bun.file(tagArgsFile).exists()
+      ? (await Bun.file(tagArgsFile).text()).trimEnd().split("\n")
+      : [];
+    return { args, tagArgs, stdout, stderr, exitCode, attempts, sleeps };
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -114,7 +131,10 @@ test("creates the latest release at npm's published commit with generated notes"
   const result = await runRelease();
   expect(result.exitCode).toBe(0);
   expect(result.args.slice(0, 3)).toEqual(["release", "create", "v0.3.0"]);
-  expect(result.args[result.args.indexOf("--target") + 1]).toBe(publishedCommit);
+  expect(result.tagArgs).toContain(`sha=${publishedCommit}`);
+  expect(result.tagArgs).toContain("ref=refs/tags/v0.3.0");
+  expect(result.args).toContain("--verify-tag");
+  expect(result.args).not.toContain("--target");
   expect(result.args[result.args.indexOf("--repo") + 1]).toBe("IgnisDa/opencode-wakelock");
   expect(result.args).toContain("--generate-notes");
   expect(result.args).toContain("--latest");
@@ -164,7 +184,29 @@ test("waits for a newly published npm version to become visible", async () => {
   expect(result.attempts).toBe(3);
   expect(result.sleeps).toEqual(["10", "10"]);
   expect(result.args).toContain("create");
-  expect(result.args[result.args.indexOf("--target") + 1]).toBe(publishedCommit);
+  expect(result.tagArgs).toContain(`sha=${publishedCommit}`);
+});
+
+test("uses an existing tag when it matches the published npm commit", async () => {
+  const result = await runRelease({ TEST_TAG_EXISTS: "true" });
+  expect(result.exitCode).toBe(0);
+  expect(result.tagArgs).toEqual([]);
+  expect(result.args).toContain("--verify-tag");
+});
+
+test("refuses an existing tag at the wrong commit without overwriting it", async () => {
+  const result = await runRelease({ TEST_TAG_EXISTS: "true", TEST_TAG_COMMIT: "a".repeat(40) });
+  expect(result.exitCode).not.toBe(0);
+  expect(result.tagArgs).toEqual([]);
+  expect(result.args).toEqual([]);
+  expect(result.stderr).toContain("does not match the published npm commit");
+});
+
+test("tag creation failure prevents release publication", async () => {
+  const result = await runRelease({ TEST_TAG_FAILURE: "true" });
+  expect(result.exitCode).not.toBe(0);
+  expect(result.tagArgs).toContain(`sha=${publishedCommit}`);
+  expect(result.args).toEqual([]);
 });
 
 test("GitHub publication failure fails the workflow", async () => {
