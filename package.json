@@ -20,6 +20,7 @@
   },
   "scripts": {
     "build": "tsc",
+    "test": "bun test",
     "prepack": "npm run build"
   },
   "devDependencies": {

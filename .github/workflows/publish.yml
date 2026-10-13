@@ -32,6 +32,9 @@ jobs:
       - name: Install dependencies
         run: bun install
 
+      - name: Run tests
+        run: bun test
+
       - name: Verify package in Node
         run: |
           PACKAGE=$(npm pack --silent)

@@ -309,6 +309,10 @@ const wakelockPlugin: Plugin = async ({ client }) => {
   };
 };
 
+// V2's event stream is server-wide. Several location-scoped plugin instances
+// can own the same entry; unloading one must not release the others' locks.
+const v2LockOwners = new Map<string, number>();
+
 const wakelockPluginV2: PluginV2 = {
   id: "opencode-wakelock",
   async setup(ctx: PluginContextV2) {
@@ -324,24 +328,51 @@ const wakelockPluginV2: PluginV2 = {
       else if (level === "debug") console.debug(line);
       else console.info(line);
     };
-    const waitingSessions = new Set<string>();
+    const ownedLocks = new Set<string>();
+    const waitingSessions = new Map<string, object>();
+    let stopped = false;
+
+    const acquireOwned = (key: string) => {
+      if (stopped) return;
+      if (!ownedLocks.has(key)) {
+        ownedLocks.add(key);
+        v2LockOwners.set(key, (v2LockOwners.get(key) ?? 0) + 1);
+      }
+      acquire(key, platform, log);
+    };
+
+    const releaseOwned = (key: string) => {
+      if (!ownedLocks.delete(key)) return;
+      const remaining = (v2LockOwners.get(key) ?? 1) - 1;
+      if (remaining > 0) {
+        v2LockOwners.set(key, remaining);
+        return;
+      }
+      v2LockOwners.delete(key);
+      release(key, platform);
+    };
 
     const watchUntilIdle = (sessionID: string) => {
       if (waitingSessions.has(sessionID)) return;
-      waitingSessions.add(sessionID);
+      const token = {};
+      waitingSessions.set(sessionID, token);
       void ctx.session.wait({ sessionID })
         .catch(() => undefined)
         .finally(() => {
+          // An older wait must not release a new execution's entry, or an
+          // entry now owned by a replacement plugin instance after cleanup.
+          if (waitingSessions.get(sessionID) !== token) return;
           waitingSessions.delete(sessionID);
-          release(sessionID, platform);
+          releaseOwned(sessionID);
         });
     };
 
     // The context hook is the reliable point at which a v2 model dispatch is
     // active. session.wait() follows it through every terminal path, including
     // cases where the public lifecycle stream does not emit an idle event.
-    await ctx.session.hook("context", (request) => {
-      acquire(request.sessionID, platform, log);
+    const contextHook = await ctx.session.hook("context", (request) => {
+      if (stopped) return;
+      acquireOwned(request.sessionID);
       watchUntilIdle(request.sessionID);
     });
 
@@ -349,21 +380,29 @@ const wakelockPluginV2: PluginV2 = {
     const watcher = (async () => {
       try {
         for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
-          const data = "data" in event && event.data && typeof event.data === "object"
-            ? event.data as { sessionID?: string; status?: { type?: string } }
-            : undefined;
-          const sessionID = data?.sessionID;
-          if (!sessionID) continue;
-          if (event.type === "session.status" && data.status?.type === "busy") {
-            acquire(sessionID, platform, log);
-            watchUntilIdle(sessionID);
-          } else if (
-            event.type === "session.idle" ||
-            event.type === "session.execution.failed" ||
-            event.type === "session.execution.interrupted"
-          ) {
-            waitingSessions.delete(sessionID);
-            release(sessionID, platform);
+          if (stopped) break;
+          switch (event.type) {
+            // Shell entries are independent of sessions. A tool can return
+            // early (or be moved to the background) while its shell runs on.
+            case "shell.created":
+              acquireOwned(`shell-${event.data.info.id}`);
+              break;
+            case "shell.exited":
+            case "shell.deleted":
+              releaseOwned(`shell-${event.data.id}`);
+              break;
+            case "session.status":
+              if (event.data.status.type === "busy") {
+                acquireOwned(event.data.sessionID);
+                watchUntilIdle(event.data.sessionID);
+              }
+              break;
+            case "session.idle":
+            case "session.execution.failed":
+            case "session.execution.interrupted":
+              waitingSessions.delete(event.data.sessionID);
+              releaseOwned(event.data.sessionID);
+              break;
           }
         }
       } catch (error) {
@@ -376,15 +415,15 @@ const wakelockPluginV2: PluginV2 = {
     })();
 
     return async () => {
+      if (stopped) return;
+      stopped = true;
+      waitingSessions.clear();
       controller.abort();
       await watcher;
-      for (const sessionID of getActiveSessions()) {
-        const filePath = `${SESSIONS_DIR}/${sessionID}`;
-        try {
-          if (Number(readFileSync(filePath, "utf8").trim()) === process.pid) {
-            release(sessionID, platform);
-          }
-        } catch {}
+      try {
+        await contextHook.dispose();
+      } finally {
+        for (const key of ownedLocks) releaseOwned(key);
       }
     };
   },

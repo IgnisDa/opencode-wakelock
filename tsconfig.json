@@ -7,5 +7,6 @@
     "strict": true,
     "skipLibCheck": true,
     "types": ["bun-types"]
-  }
+  },
+  "include": ["index.ts"]
 }

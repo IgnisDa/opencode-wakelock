@@ -1,8 +1,9 @@
 # opencode-wakelock
 
-Prevents the system from sleeping while an OpenCode agent session is actively
-running. Releases the wake lock the moment all sessions go idle or error.
-Supports multiple parallel OpenCode instances.
+Prevents the system from sleeping while any OpenCode agent session runs. In
+OpenCode v2, the wake lock also remains active for OpenCode-managed background
+shell commands until they exit. OpenCode v1 remains session-only: its wake lock
+is released when all sessions go idle or error.
 
 Works on **macOS** (via `caffeinate`) and **Linux** (via `systemd-inhibit`,
 including Fedora + KDE Plasma, Ubuntu, Arch, and any other systemd-based
@@ -10,16 +11,28 @@ distro). On other platforms the plugin loads but does nothing.
 
 ## How it works
 
-Hooks into OpenCode session lifecycle events:
+The plugin uses shared lock entries in `/tmp/opencode-wakelock/sessions/` and
+runs one platform-specific inhibitor while any entry remains. Session and shell
+entries share this directory; shell entries use the `shell-` prefix. The
+inhibitor stops only when no session or shell entries remain.
 
-- `session.status` with `status.type: "busy"` → registers the session and starts
-  the platform-specific inhibitor
-- `session.idle` or `session.error` → deregisters the session; stops the
-  inhibitor when no sessions remain active
+### OpenCode v1
 
-Session state is tracked via files in `/tmp/opencode-wakelock/sessions/`. A
-single inhibitor process is shared across all OpenCode instances. Stale session
-files from crashed instances are automatically detected and removed.
+- A busy `session.status` acquires a lock for that session.
+- `session.idle` or `session.error` releases that session's lock.
+- V1 tracks sessions only; background shell commands do not keep the wake lock
+  active.
+
+### OpenCode v2
+
+- The context hook acquires a lock for each session, and `session.wait` releases
+  it.
+- `shell.created` acquires an independent lock for that shell ID. `shell.exited`
+  (including nonzero exit, timeout, or kill) or `shell.deleted` releases it.
+- Only OpenCode-managed shells are tracked. Detached descendants that continue
+  after the shell wrapper exits are not covered.
+- Shells already running when the plugin reloads are not rediscovered because
+  the V2 plugin context has no shell inventory API.
 
 ### Platform-specific inhibitors
 
@@ -79,3 +92,13 @@ No additional dependencies are required. `caffeinate` ships with macOS and
 - **Efficient**: Only one inhibitor process runs, shared across all instances
 - **Zero overhead on unsupported platforms**: Plugin loads but does nothing on
   Windows / BSD
+
+## Development
+
+```sh
+bun install --frozen-lockfile
+bun test
+bun run build
+```
+
+Tests use isolated mock OS state and do not start real inhibitors.
