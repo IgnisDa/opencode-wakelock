@@ -115,3 +115,8 @@ The workflow uses the built-in `GITHUB_TOKEN`; no extra release token is needed.
 If the npm version or GitHub release already exists, that step is skipped, so
 rerunning the workflow can create a missing GitHub release without republishing
 the package. You can also run the workflow manually.
+
+If workflow files changed after the published commit, GitHub can reject creating
+its historical tag with `GITHUB_TOKEN`. In that case, a maintainer must first push
+`v<version>` at the npm `gitHead`, then rerun the workflow. Existing tags are
+checked against the published commit and are never moved.
