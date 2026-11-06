@@ -38,8 +38,30 @@ interface InhibitorCommand {
 }
 
 function getInhibitorCommand(platform: SupportedPlatform): InhibitorCommand {
+  // The inhibitor is shared across servers. Watch all entry owners, not
+  // just the server that spawned it, so a crash cannot orphan the lock or
+  // release another server's active sessions/background shells.
+  const watchdog = [
+    "sh",
+    "-c",
+    `while :; do
+  active=false
+  for entry in "$1"/*; do
+    pid=$(cat "$entry" 2>/dev/null) || continue
+    case "$pid" in ''|*[!0-9]*|0*) continue ;; esac
+    if kill -0 "$pid" 2>/dev/null; then
+      active=true
+      break
+    fi
+  done
+  "$active" || exit 0
+  sleep 1
+done`,
+    "opencode-wakelock",
+    SESSIONS_DIR,
+  ];
   if (platform === "darwin") {
-    return { command: "caffeinate", args: ["-i"] };
+    return { command: "caffeinate", args: ["-i", ...watchdog] };
   }
   return {
     command: "systemd-inhibit",
@@ -47,8 +69,7 @@ function getInhibitorCommand(platform: SupportedPlatform): InhibitorCommand {
       "--what=sleep:idle",
       "--who=opencode-wakelock",
       "--why=OpenCode session is active",
-      "sleep",
-      "infinity",
+      ...watchdog,
     ],
   };
 }
@@ -57,6 +78,8 @@ type CaffeinateProcess = {
   pid: number;
   // Absent only in PID files written by releases through 0.1.5.
   startedAt?: string;
+  // caffeinate execs the supervised shell at the PID returned by spawn.
+  watchdog?: true;
 };
 
 function isProcessAlive(pid: number): boolean {
@@ -100,7 +123,13 @@ function readCaffeinateProcess(): CaffeinateProcess | undefined {
 
 function isCaffeinateProcess(stored: CaffeinateProcess): boolean {
   const info = getProcessInfo(stored.pid);
-  if (!info || info.command !== "caffeinate") return false;
+  if (!info) return false;
+  if (stored.watchdog) {
+    // The command may still be caffeinate while it is starting the shell.
+    return (info.command === "sh" || info.command === "caffeinate")
+      && !!stored.startedAt && stored.startedAt === info.startedAt;
+  }
+  if (info.command !== "caffeinate") return false;
   if (stored.startedAt) return stored.startedAt === info.startedAt;
 
   // Migrate legacy PID-only files only when caffeinate is owned by OpenCode.
@@ -195,6 +224,7 @@ function startLock(platform: SupportedPlatform, log: LogFn): boolean {
         writeFileSync(LOCK_PID_FILE, JSON.stringify({
           pid: proc.pid,
           startedAt: info.startedAt,
+          watchdog: true,
         }));
       } else {
         writeFileSync(LOCK_PID_FILE, String(proc.pid));

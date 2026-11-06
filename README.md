@@ -36,15 +36,21 @@ inhibitor stops only when no session or shell entries remain.
 
 ### Platform-specific inhibitors
 
-| Platform | Command                                                                 | Blocks                    |
-| -------- | ----------------------------------------------------------------------- | ------------------------- |
-| macOS    | `caffeinate -i`                                                         | System idle timer         |
-| Linux    | `systemd-inhibit --what=sleep:idle ... sleep infinity`                  | System sleep + idle timer |
+| Platform | Command                                                  | Blocks                    |
+| -------- | -------------------------------------------------------- | ------------------------- |
+| macOS    | `caffeinate -i sh -c <watchdog>`                         | System idle timer         |
+| Linux    | `systemd-inhibit --what=sleep:idle ... sh -c <watchdog>` | System sleep + idle timer |
 
 On Linux, `systemd-inhibit` is used because it ships with systemd (installed by
 default on Fedora, Ubuntu, Arch, openSUSE, Debian, etc.) and works regardless
 of desktop environment — KDE Plasma, GNOME, XFCE, sway, headless servers, and
 remote SSH sessions all work the same way.
+
+On both platforms, the watchdog checks the server PIDs in the shared session
+and shell entries once per second. If a server crashes or is killed, its entries no longer
+keep the inhibitor alive. The inhibitor exits when no tracked owner is alive,
+even without plugin cleanup or an OpenCode restart. Work owned by other running
+OpenCode servers continues to keep the inhibitor active.
 
 If `systemd-inhibit` is unavailable (e.g. non-systemd distros like Void or
 Artix, or minimal containers), the plugin logs a warning and continues without
@@ -101,7 +107,8 @@ bun test
 bun run build
 ```
 
-Tests use isolated mock OS state and do not start real inhibitors.
+Tests use isolated mock OS state and do not start real inhibitors. Watchdog
+tests also run real shell processes against temporary lock entries to verify shutdown after SIGKILL and continued protection across multiple servers.
 
 ## Releases
 
