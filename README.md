@@ -5,6 +5,14 @@ OpenCode v2, the wake lock also remains active for OpenCode-managed background
 shell commands until they exit. OpenCode v1 remains session-only: its wake lock
 is released when all sessions go idle or error.
 
+While OpenCode blocks waiting for **user input** — a permission prompt
+(`permission.asked`), the question tool (`question.asked`), or a form
+(`form.created`) — the session's lock entry is temporarily held back so the system
+may sleep while you are away. The lock is re-acquired when you answer or cancel
+(`permission.replied`, `question.replied`, `question.cancelled`, `form.replied`,
+`form.cancelled`), provided the session is still active. A reply that arrives after
+the session has gone idle or failed does not resurrect the lock.
+
 Works on **macOS** (via `caffeinate`) and **Linux** (via `systemd-inhibit`,
 including Fedora + KDE Plasma, Ubuntu, Arch, and any other systemd-based
 distro). On other platforms the plugin loads but does nothing.
@@ -20,6 +28,10 @@ inhibitor stops only when no session or shell entries remain.
 
 - A busy `session.status` acquires a lock for that session.
 - `session.idle` or `session.error` releases that session's lock.
+- `permission.asked` / `question.asked` / `form.created` hold the session's entry
+  back so the system may sleep while awaiting user input;
+  `permission.replied` / `question.replied` / `question.cancelled` /
+  `form.replied` / `form.cancelled` re-acquire it if the session is still active.
 - V1 tracks sessions only; background shell commands do not keep the wake lock
   active.
 
@@ -29,6 +41,10 @@ inhibitor stops only when no session or shell entries remain.
   it.
 - `shell.created` acquires an independent lock for that shell ID. `shell.exited`
   (including nonzero exit, timeout, or kill) or `shell.deleted` releases it.
+- `permission.asked` / `question.asked` / `form.created` hold the session's entry
+  back so the system may sleep while awaiting user input;
+  `permission.replied` / `question.replied` / `question.cancelled` /
+  `form.replied` / `form.cancelled` re-acquire it if the session is still active.
 - Only OpenCode-managed shells are tracked. Detached descendants that continue
   after the shell wrapper exits are not covered.
 - Shells already running when the plugin reloads are not rediscovered because

@@ -26,6 +26,16 @@ type LogFn = (
   extra?: Record<string, unknown>,
 ) => Promise<void>;
 
+// Extracts the sessionID a user-input event belongs to. v1 delivers the payload
+// under `properties`, v2 under `data`, and `form.created` nests it under `form`.
+function sessionIDOf(
+  event: { properties?: unknown; data?: unknown },
+): string | undefined {
+  const payload = event.properties ?? event.data;
+  const p = payload as { sessionID?: string; form?: { sessionID?: string } };
+  return p?.sessionID ?? p?.form?.sessionID;
+}
+
 function detectPlatform(): SupportedPlatform | null {
   if (process.platform === "darwin") return "darwin";
   if (process.platform === "linux") return "linux";
@@ -313,12 +323,70 @@ const wakelockPlugin: Plugin = async ({ client }) => {
 
   await log("info", "Startup cleanup complete", { platform });
 
+  // Sessions blocked on human input (a permission prompt, the question tool, or a
+  // form). Their session entry is held back so the system may sleep while every
+  // session is waiting for the user.
+  const waitingForInput = new Set<string>();
+  const activeSessions = new Set<string>();
+
+  // Event types that mean OpenCode is now blocked waiting for the user.
+  const WAIT_EVENTS = new Set([
+    "permission.asked",
+    "form.created",
+    "question.asked",
+  ]);
+  // Event types that mean the user has answered or cancelled.
+  const RESUME_EVENTS = new Set([
+    "permission.replied",
+    "form.replied",
+    "form.cancelled",
+    "question.replied",
+    "question.cancelled",
+  ]);
+
+  // Hold back a session's lock entry so the system may sleep while the user is
+  // away. When the wait event carries no sessionID (e.g. the question tool),
+  // fall back to holding back every active session, since the question blocks
+  // the running turn regardless of which session emitted it.
+  const suspendForInput = (sessionID: string | undefined) => {
+    if (sessionID) {
+      if (waitingForInput.has(sessionID)) return;
+      waitingForInput.add(sessionID);
+      release(sessionID, platform);
+      return;
+    }
+    for (const id of activeSessions) {
+      if (waitingForInput.has(id)) continue;
+      waitingForInput.add(id);
+      release(id, platform);
+    }
+  };
+
+  // The user has answered (or cancelled). Re-acquire the session's entry only if
+  // the session is still active, so a late reply does not resurrect a stale lock.
+  const resumeFromInput = (sessionID: string | undefined) => {
+    const ids = sessionID
+      ? [sessionID]
+      : [...waitingForInput];
+    for (const id of ids) {
+      waitingForInput.delete(id);
+      if (activeSessions.has(id)) {
+        const acquired = acquire(id, platform, log);
+        if (acquired) {
+          void log("info", "Re-acquired wakelock (user replied)", { sessionID: id });
+        }
+      }
+    }
+  };
+
   return {
     event: async ({ event }) => {
       await log("debug", "Event received", { type: event.type });
 
       if (event.type === "session.status" && event.properties.status.type === "busy") {
         const { sessionID } = (event as any).properties;
+        activeSessions.add(sessionID);
+        waitingForInput.delete(sessionID);
         if (acquire(sessionID, platform, log)) {
           await log("info", "Acquired wakelock (session busy)", { sessionID });
         }
@@ -326,14 +394,33 @@ const wakelockPlugin: Plugin = async ({ client }) => {
 
       if (event.type === "session.idle") {
         const { sessionID } = (event as any).properties;
+        waitingForInput.delete(sessionID);
+        activeSessions.delete(sessionID);
         release(sessionID, platform);
         await log("info", "Released wakelock (session idle)", { sessionID });
       }
 
       if (event.type === "session.error") {
         const { sessionID } = (event as any).properties;
-        if (sessionID) release(sessionID, platform);
-        await log("info", "Released wakelock (session error)", { sessionID });
+        if (sessionID) {
+          waitingForInput.delete(sessionID);
+          activeSessions.delete(sessionID);
+          release(sessionID, platform);
+          await log("info", "Released wakelock (session error)", { sessionID });
+        }
+      }
+
+      // OpenCode is blocked waiting for the user to answer (a permission prompt,
+      // the question tool, or a form). Release the session's lock entry so the
+      // system may sleep while the user is away.
+      const type = event.type as string;
+      if (WAIT_EVENTS.has(type)) {
+        suspendForInput(sessionIDOf(event));
+      }
+
+      // The user has answered or cancelled. Re-acquire the session's entry.
+      if (RESUME_EVENTS.has(type)) {
+        resumeFromInput(sessionIDOf(event));
       }
     },
   };
@@ -360,10 +447,18 @@ const wakelockPluginV2: PluginV2 = {
     };
     const ownedLocks = new Set<string>();
     const waitingSessions = new Map<string, object>();
+    // Sessions blocked on human input (a permission prompt or a form such as the
+    // question tool). Their session entry is held back so the system may sleep
+    // while every session is waiting for the user.
+    const waitingForInput = new Set<string>();
+    // Sessions this instance still considers active. Guards re-acquisition after a
+    // session has gone terminal, so a late reply does not resurrect a stale lock.
+    const activeSessions = new Set<string>();
     let stopped = false;
 
     const acquireOwned = (key: string) => {
       if (stopped) return;
+      if (!key.startsWith("shell-")) activeSessions.add(key);
       if (!ownedLocks.has(key)) {
         ownedLocks.add(key);
         v2LockOwners.set(key, (v2LockOwners.get(key) ?? 0) + 1);
@@ -380,6 +475,35 @@ const wakelockPluginV2: PluginV2 = {
       }
       v2LockOwners.delete(key);
       release(key, platform);
+    };
+
+    // OpenCode is blocked waiting for the user to answer (a permission prompt, the
+    // question tool, or a form). Hold back the session's lock entry so the system
+    // may sleep while the user is away.
+    const suspendForInput = (sessionID: string | undefined) => {
+      if (stopped) return;
+      if (sessionID) {
+        if (waitingForInput.has(sessionID)) return;
+        waitingForInput.add(sessionID);
+        releaseOwned(sessionID);
+        return;
+      }
+      for (const id of activeSessions) {
+        if (waitingForInput.has(id)) continue;
+        waitingForInput.add(id);
+        releaseOwned(id);
+      }
+    };
+
+    // The user has answered (or cancelled). Re-acquire the session's entry only if
+    // the session is still active.
+    const resumeFromInput = (sessionID: string | undefined) => {
+      if (stopped) return;
+      const ids = sessionID ? [sessionID] : [...waitingForInput];
+      for (const id of ids) {
+        waitingForInput.delete(id);
+        if (activeSessions.has(id)) acquireOwned(id);
+      }
     };
 
     const watchUntilIdle = (sessionID: string) => {
@@ -431,8 +555,41 @@ const wakelockPluginV2: PluginV2 = {
             case "session.execution.failed":
             case "session.execution.interrupted":
               waitingSessions.delete(event.data.sessionID);
+              waitingForInput.delete(event.data.sessionID);
+              activeSessions.delete(event.data.sessionID);
               releaseOwned(event.data.sessionID);
               break;
+            // OpenCode is blocked waiting for the user to answer (a permission
+            // prompt or a form). Release the session's lock entry so the system
+            // may sleep while the user is away.
+            case "permission.asked":
+            case "form.created": {
+              const sessionID = (event.data as { sessionID?: string; form?: { sessionID?: string } }).sessionID
+                ?? (event.data as { form?: { sessionID?: string } }).form?.sessionID;
+              suspendForInput(sessionID);
+              break;
+            }
+            // The user has answered or cancelled. Re-acquire the session's entry.
+            case "permission.replied":
+            case "form.replied":
+            case "form.cancelled":
+              resumeFromInput((event.data as { sessionID?: string; form?: { sessionID?: string } }).sessionID
+                ?? (event.data as { form?: { sessionID?: string } }).form?.sessionID);
+              break;
+          }
+
+          // The question tool emits question.* events that are not in this SDK's
+          // event union yet, but block the turn the same way as a permission
+          // prompt or form. Handle them via a string cast, as the v1 path does.
+          const questionType = event.type as string;
+          if (questionType === "question.asked") {
+            const sessionID = (event.data as { sessionID?: string; form?: { sessionID?: string } }).sessionID
+              ?? (event.data as { form?: { sessionID?: string } }).form?.sessionID;
+            suspendForInput(sessionID);
+          }
+          if (questionType === "question.replied" || questionType === "question.cancelled") {
+            resumeFromInput((event.data as { sessionID?: string; form?: { sessionID?: string } }).sessionID
+              ?? (event.data as { form?: { sessionID?: string } }).form?.sessionID);
           }
         }
       } catch (error) {
@@ -448,6 +605,8 @@ const wakelockPluginV2: PluginV2 = {
       if (stopped) return;
       stopped = true;
       waitingSessions.clear();
+      waitingForInput.clear();
+      activeSessions.clear();
       controller.abort();
       await watcher;
       try {
