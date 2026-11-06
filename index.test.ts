@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { EventEmitter } from "node:events";
+import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Context as PluginContextV2 } from "@opencode/plugin/promise/plugin";
 
 const root = "/tmp/opencode-wakelock";
@@ -13,6 +16,7 @@ let nextPid = 500_000;
 
 // Keep every filesystem and process operation inside this fixture. Tests never
 // touch live wake-lock files or start/stop real OS inhibitor processes.
+// Watchdog tests below use real shell/owner processes in a temporary directory.
 mock.module("fs", () => ({
   existsSync: (path: string) => files.has(path) || directories.has(path),
   mkdirSync: (path: string) => { directories.add(path); },
@@ -32,7 +36,7 @@ mock.module("fs", () => ({
 const spawn = mock((command: string, _args: string[], _options: unknown) => {
   const pid = nextPid++;
   livePids.add(pid);
-  processes.set(pid, { command, startedAt: `Mon Oct 13 12:00:${pid} 2026` });
+  processes.set(pid, { command: command === "caffeinate" && _args.includes("sh") ? "sh" : command, startedAt: `Mon Oct 13 12:00:${pid} 2026` });
   return Object.assign(new EventEmitter(), {
     pid,
     unref: () => {},
@@ -351,6 +355,84 @@ test("V2 stays inactive on unsupported platforms", async () => {
   expect(await plugin.setup({} as PluginContextV2)).toBeUndefined();
   expect(entries()).toEqual([]);
   expect(spawn).not.toHaveBeenCalled();
+});
+
+for (const platform of ["darwin", "linux"] as const) {
+  for (const scenario of ["server crash", "shared servers", "entries released"] as const) {
+    test(`${platform} watchdog exits after ${scenario}`, async () => {
+      Object.defineProperty(process, "platform", { value: platform });
+      const runtime = await setupV2();
+      runtime.dispatch("ses_watchdog");
+      const [command, args] = spawn.mock.calls[0];
+      expect(command).toBe(platform === "darwin" ? "caffeinate" : "systemd-inhibit");
+      const offset = platform === "darwin" ? 1 : 3;
+      expect(args.slice(offset, offset + 2)).toEqual(["sh", "-c"]);
+      expect(args.at(-1)).toBe(sessionsDirectory);
+
+      // Run the exact supervised command without needing systemd or taking a
+      // real sleep inhibitor. SIGKILL bypasses all plugin cleanup, as in #10.
+      const directory = await mkdtemp(join(tmpdir(), "wakelock-watchdog-"));
+      const owners = [Bun.spawn(["sleep", "60"], { stdout: "ignore", stderr: "ignore" })];
+      let watchdog: ReturnType<typeof Bun.spawn> | undefined;
+      try {
+        await writeFile(join(directory, "ses_first"), String(owners[0].pid));
+        for (const [name, value] of Object.entries({ empty: "", zero: "0", negative: "-1", invalid: "not-a-pid" })) {
+          await writeFile(join(directory, name), value);
+        }
+        watchdog = Bun.spawn([...args.slice(offset, -1), directory], { stdout: "ignore", stderr: "pipe" });
+        await Bun.sleep(1200);
+        expect(watchdog.exitCode).toBeNull();
+
+        if (scenario === "shared servers") {
+          owners.push(Bun.spawn(["sleep", "60"], { stdout: "ignore", stderr: "ignore" }));
+          await writeFile(join(directory, "shell-second"), String(owners[1].pid));
+        }
+        if (scenario === "entries released") {
+          await rm(join(directory, "ses_first"));
+        } else {
+          owners[0].kill("SIGKILL");
+          await owners[0].exited;
+        }
+        if (scenario === "shared servers") {
+          await Bun.sleep(1200);
+          expect(watchdog.exitCode).toBeNull();
+          owners[1].kill("SIGKILL");
+          await owners[1].exited;
+        }
+        expect(await Promise.race([
+          watchdog.exited,
+          Bun.sleep(3000).then(() => "watchdog did not exit"),
+        ])).toBe(0);
+      } finally {
+        watchdog?.kill();
+        for (const owner of owners) owner.kill();
+        await Promise.all([...owners.map((owner) => owner.exited), watchdog?.exited]);
+        await rm(directory, { recursive: true, force: true });
+      }
+    }, 8000);
+  }
+}
+
+test("macOS cleanup does not kill a reused watchdog PID", async () => {
+  Object.defineProperty(process, "platform", { value: "darwin" });
+  const runtime = await setupV2();
+  runtime.dispatch("ses_identity");
+  const [pid] = inhibitorPids();
+  expect(JSON.parse(files.get(`${root}/lock.pid`)!)).toMatchObject({ pid, watchdog: true });
+  processes.set(pid, { command: "sh", startedAt: "a different start time" });
+  await runtime.cleanup();
+  expect(livePids.has(pid)).toBe(true);
+});
+
+test("macOS startup still cleans up legacy caffeinate records", async () => {
+  Object.defineProperty(process, "platform", { value: "darwin" });
+  const pid = 123456;
+  livePids.add(pid);
+  processes.set(pid, { command: "caffeinate", startedAt: "legacy start time" });
+  files.set(`${root}/lock.pid`, JSON.stringify({ pid, startedAt: "legacy start time" }));
+  await setupV2();
+  expect(livePids.has(pid)).toBe(false);
+  expect(files.has(`${root}/lock.pid`)).toBe(false);
 });
 
 test("V1 retains session-only lifecycle behavior", async () => {
