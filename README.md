@@ -8,8 +8,8 @@ is released when all sessions go idle or error.
 While OpenCode blocks waiting for **user input** — a permission prompt
 (`permission.asked`), the question tool (`question.asked`), or a form
 (`form.created`) — the session's lock entry is temporarily held back so the system
-may sleep while you are away. The lock is re-acquired when you answer or cancel
-(`permission.replied`, `question.replied`, `question.cancelled`, `form.replied`,
+may sleep while you are away. The lock is re-acquired when you answer or dismiss
+(`permission.replied`, `question.replied`, `question.rejected`, `form.replied`,
 `form.cancelled`), provided the session is still active. A reply that arrives after
 the session has gone idle or failed does not resurrect the lock.
 
@@ -30,7 +30,7 @@ inhibitor stops only when no session or shell entries remain.
 - `session.idle` or `session.error` releases that session's lock.
 - `permission.asked` / `question.asked` / `form.created` hold the session's entry
   back so the system may sleep while awaiting user input;
-  `permission.replied` / `question.replied` / `question.cancelled` /
+  `permission.replied` / `question.replied` / `question.rejected` /
   `form.replied` / `form.cancelled` re-acquire it if the session is still active.
 - V1 tracks sessions only; background shell commands do not keep the wake lock
   active.
@@ -43,7 +43,7 @@ inhibitor stops only when no session or shell entries remain.
   (including nonzero exit, timeout, or kill) or `shell.deleted` releases it.
 - `permission.asked` / `question.asked` / `form.created` hold the session's entry
   back so the system may sleep while awaiting user input;
-  `permission.replied` / `question.replied` / `question.cancelled` /
+  `permission.replied` / `question.replied` / `question.rejected` /
   `form.replied` / `form.cancelled` re-acquire it if the session is still active.
 - Only OpenCode-managed shells are tracked. Detached descendants that continue
   after the shell wrapper exits are not covered.
