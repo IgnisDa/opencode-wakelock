@@ -517,6 +517,11 @@ const wakelockPluginV2: PluginV2 = {
           // entry now owned by a replacement plugin instance after cleanup.
           if (waitingSessions.get(sessionID) !== token) return;
           waitingSessions.delete(sessionID);
+          // session.wait() can complete on terminal paths that emit no public
+          // idle event, so clear the session's bookkeeping here; otherwise a
+          // late input reply could re-acquire a lock with no wait to release it.
+          activeSessions.delete(sessionID);
+          waitingForInput.delete(sessionID);
           releaseOwned(sessionID);
         });
     };

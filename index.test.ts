@@ -475,6 +475,24 @@ for (const platform of ["darwin", "linux"] as const) {
       expect(entries()).toEqual([]);
       expect(inhibitorPids()).toEqual([]);
     });
+
+    test("a late input reply does not resurrect the lock when the wait resolves with no idle event", async () => {
+      const runtime = await setupV2();
+      runtime.dispatch("ses_wait");
+      expect(inhibitorPids()).toHaveLength(1);
+
+      await runtime.emit("permission.asked", { sessionID: "ses_wait" });
+      expect(entries()).toEqual([]);
+      expect(inhibitorPids()).toEqual([]);
+
+      // session.wait() completes on a terminal path that emits no idle event.
+      runtime.waits[0].deferred.resolve();
+      await flushWaits();
+
+      await runtime.emit("permission.replied", { sessionID: "ses_wait", reply: "once" });
+      expect(entries()).toEqual([]);
+      expect(inhibitorPids()).toEqual([]);
+    });
   });
 }
 
