@@ -347,6 +347,195 @@ for (const platform of ["darwin", "linux"] as const) {
       }
       expect(spawn).toHaveBeenCalledTimes(2);
     });
+
+    test("releases the lock while a session waits for permission input, then re-acquires on reply", async () => {
+      const runtime = await setupV2();
+      runtime.dispatch("ses_q");
+      expect(entries()).toEqual(["ses_q"]);
+      expect(inhibitorPids()).toHaveLength(1);
+
+      await runtime.emit("permission.asked", { sessionID: "ses_q" });
+      expect(entries()).toEqual([]);
+      expect(inhibitorPids()).toEqual([]);
+
+      await runtime.emit("permission.replied", { sessionID: "ses_q", reply: "once" });
+      expect(entries()).toEqual(["ses_q"]);
+      expect(inhibitorPids()).toHaveLength(1);
+
+      runtime.waits[0].deferred.resolve();
+      await flushWaits();
+      expect(inhibitorPids()).toEqual([]);
+    });
+
+    test("releases the lock for a question form and re-acquires on reply", async () => {
+      const runtime = await setupV2();
+      runtime.dispatch("ses_form");
+      expect(inhibitorPids()).toHaveLength(1);
+
+      await runtime.emit("form.created", {
+        form: { id: "form_1", sessionID: "ses_form", title: "Pick one", fields: [] },
+      });
+      expect(entries()).toEqual([]);
+      expect(inhibitorPids()).toEqual([]);
+
+      await runtime.emit("form.replied", { id: "form_1", sessionID: "ses_form", answer: {} });
+      expect(entries()).toEqual(["ses_form"]);
+      expect(inhibitorPids()).toHaveLength(1);
+
+      runtime.waits[0].deferred.resolve();
+      await flushWaits();
+      expect(inhibitorPids()).toEqual([]);
+    });
+
+    test("a cancelled form does not re-acquire the lock", async () => {
+      const runtime = await setupV2();
+      runtime.dispatch("ses_cancel");
+      await runtime.emit("form.created", {
+        form: { id: "form_2", sessionID: "ses_cancel", title: "Confirm", fields: [] },
+      });
+      expect(inhibitorPids()).toEqual([]);
+
+      await runtime.emit("form.cancelled", { id: "form_2", sessionID: "ses_cancel" });
+      expect(entries()).toEqual(["ses_cancel"]);
+      expect(inhibitorPids()).toHaveLength(1);
+
+      runtime.waits[0].deferred.resolve();
+      await flushWaits();
+      expect(inhibitorPids()).toEqual([]);
+    });
+
+    test("releases the lock while a session waits for the question tool, then re-acquires", async () => {
+      const runtime = await setupV2();
+      runtime.dispatch("ses_question");
+      expect(entries()).toEqual(["ses_question"]);
+      expect(inhibitorPids()).toHaveLength(1);
+
+      await runtime.emit("question.asked", { sessionID: "ses_question" });
+      expect(entries()).toEqual([]);
+      expect(inhibitorPids()).toEqual([]);
+
+      await runtime.emit("question.replied", { sessionID: "ses_question" });
+      expect(entries()).toEqual(["ses_question"]);
+      expect(inhibitorPids()).toHaveLength(1);
+
+      runtime.waits[0].deferred.resolve();
+      await flushWaits();
+      expect(inhibitorPids()).toEqual([]);
+    });
+
+    test("a rejected question re-acquires the lock", async () => {
+      const runtime = await setupV2();
+      runtime.dispatch("ses_reject");
+      expect(inhibitorPids()).toHaveLength(1);
+
+      await runtime.emit("question.asked", { id: "req_reject", sessionID: "ses_reject" });
+      expect(entries()).toEqual([]);
+      expect(inhibitorPids()).toEqual([]);
+
+      await runtime.emit("question.rejected", { sessionID: "ses_reject", requestID: "req_reject" });
+      expect(entries()).toEqual(["ses_reject"]);
+      expect(inhibitorPids()).toHaveLength(1);
+
+      runtime.waits[0].deferred.resolve();
+      await flushWaits();
+      expect(inhibitorPids()).toEqual([]);
+    });
+
+    test("a question.asked with no sessionID suspends every active session", async () => {
+      const runtime = await setupV2();
+      runtime.dispatch("ses_a");
+      runtime.dispatch("ses_b");
+      expect(inhibitorPids()).toHaveLength(1);
+
+      await runtime.emit("question.asked", {});
+      expect(entries()).toEqual([]);
+      expect(inhibitorPids()).toEqual([]);
+
+      await runtime.emit("question.replied", {});
+      expect(entries()).toEqual(["ses_a", "ses_b"]);
+      expect(inhibitorPids()).toHaveLength(1);
+
+      for (const pending of runtime.waits) pending.deferred.resolve();
+      await flushWaits();
+      expect(inhibitorPids()).toEqual([]);
+    });
+
+    test("keeps the lock while another session is busy and one waits for input", async () => {
+      const runtime = await setupV2();
+      runtime.dispatch("ses_a");
+      runtime.dispatch("ses_b");
+      expect(inhibitorPids()).toHaveLength(1);
+
+      await runtime.emit("permission.asked", { sessionID: "ses_a" });
+      // ses_b is still active, so the lock must stay held.
+      expect(entries()).toContain("ses_b");
+      expect(inhibitorPids()).toHaveLength(1);
+
+      await runtime.emit("permission.replied", { sessionID: "ses_a", reply: "once" });
+      expect(entries()).toEqual(["ses_a", "ses_b"]);
+
+      for (const pending of runtime.waits) pending.deferred.resolve();
+      await flushWaits();
+      expect(inhibitorPids()).toEqual([]);
+    });
+
+    test("a reply after the session went idle does not resurrect the lock", async () => {
+      const runtime = await setupV2();
+      runtime.dispatch("ses_idle");
+      await runtime.emit("permission.asked", { sessionID: "ses_idle" });
+      expect(inhibitorPids()).toEqual([]);
+
+      await runtime.emit("session.idle", { sessionID: "ses_idle" });
+      runtime.waits[0].deferred.resolve();
+      await flushWaits();
+
+      await runtime.emit("permission.replied", { sessionID: "ses_idle", reply: "once" });
+      expect(entries()).toEqual([]);
+      expect(inhibitorPids()).toEqual([]);
+    });
+
+    test("a late input reply does not resurrect the lock when the wait resolves with no idle event", async () => {
+      const runtime = await setupV2();
+      runtime.dispatch("ses_wait");
+      expect(inhibitorPids()).toHaveLength(1);
+
+      await runtime.emit("permission.asked", { sessionID: "ses_wait" });
+      expect(entries()).toEqual([]);
+      expect(inhibitorPids()).toEqual([]);
+
+      // session.wait() completes on a terminal path that emits no idle event.
+      runtime.waits[0].deferred.resolve();
+      await flushWaits();
+
+      await runtime.emit("permission.replied", { sessionID: "ses_wait", reply: "once" });
+      expect(entries()).toEqual([]);
+      expect(inhibitorPids()).toEqual([]);
+    });
+
+    test("a session with overlapping prompts stays suspended until the last resolves", async () => {
+      const runtime = await setupV2();
+      runtime.dispatch("ses_multi");
+      expect(inhibitorPids()).toHaveLength(1);
+
+      await runtime.emit("permission.asked", { id: "req_a", sessionID: "ses_multi" });
+      await runtime.emit("permission.asked", { id: "req_b", sessionID: "ses_multi" });
+      expect(entries()).toEqual([]);
+      expect(inhibitorPids()).toEqual([]);
+
+      // Resolving the first prompt must not re-acquire while the second is pending.
+      await runtime.emit("permission.replied", { sessionID: "ses_multi", requestID: "req_a", reply: "once" });
+      expect(entries()).toEqual([]);
+      expect(inhibitorPids()).toEqual([]);
+
+      // Resolving the last pending prompt re-acquires the entry.
+      await runtime.emit("permission.replied", { sessionID: "ses_multi", requestID: "req_b", reply: "once" });
+      expect(entries()).toEqual(["ses_multi"]);
+      expect(inhibitorPids()).toHaveLength(1);
+
+      runtime.waits[0].deferred.resolve();
+      await flushWaits();
+      expect(inhibitorPids()).toEqual([]);
+    });
   });
 }
 
@@ -452,5 +641,111 @@ test("V1 retains session-only lifecycle behavior", async () => {
   await emit("session.status", { sessionID: "ses_v1_error", status: { type: "busy" } });
   await emit("session.error", { sessionID: "ses_v1_error" });
   expect(entries()).toEqual([]);
+  expect(inhibitorPids()).toEqual([]);
+});
+
+test("V1 releases the lock while waiting for user input and re-acquires on reply", async () => {
+  Object.defineProperty(process, "platform", { value: "darwin" });
+  const hooks = await plugin.server({
+    client: { app: { log: async () => {} } },
+  } as unknown as Parameters<typeof plugin.server>[0]);
+  const emit = async (type: string, properties: Record<string, unknown>) => {
+    await hooks.event!({ event: { type, properties } } as Parameters<NonNullable<typeof hooks.event>>[0]);
+  };
+
+  await emit("session.status", { sessionID: "ses_v1_input", status: { type: "busy" } });
+  expect(inhibitorPids()).toHaveLength(1);
+
+  await emit("permission.asked", { sessionID: "ses_v1_input" });
+  expect(entries()).toEqual([]);
+  expect(inhibitorPids()).toEqual([]);
+
+  await emit("permission.replied", { sessionID: "ses_v1_input", reply: "once" });
+  expect(entries()).toEqual(["ses_v1_input"]);
+  expect(inhibitorPids()).toHaveLength(1);
+
+  await emit("session.idle", { sessionID: "ses_v1_input" });
+  expect(inhibitorPids()).toEqual([]);
+});
+
+test("V1 handles the question form via form.created / form.cancelled", async () => {
+  Object.defineProperty(process, "platform", { value: "darwin" });
+  const hooks = await plugin.server({
+    client: { app: { log: async () => {} } },
+  } as unknown as Parameters<typeof plugin.server>[0]);
+  const emit = async (type: string, properties: Record<string, unknown>) => {
+    await hooks.event!({ event: { type, properties } } as Parameters<NonNullable<typeof hooks.event>>[0]);
+  };
+
+  await emit("session.status", { sessionID: "ses_v1_form", status: { type: "busy" } });
+  expect(inhibitorPids()).toHaveLength(1);
+
+  // form.created nests sessionID under `form`.
+  await emit("form.created", {
+    form: { id: "f1", sessionID: "ses_v1_form", title: "Pick one", fields: [] },
+  });
+  expect(entries()).toEqual([]);
+  expect(inhibitorPids()).toEqual([]);
+
+  await emit("form.replied", { id: "f1", sessionID: "ses_v1_form", answer: {} });
+  expect(entries()).toEqual(["ses_v1_form"]);
+  expect(inhibitorPids()).toHaveLength(1);
+
+  await emit("session.idle", { sessionID: "ses_v1_form" });
+  expect(inhibitorPids()).toEqual([]);
+});
+
+test("V1 handles the question tool via question.asked / question.rejected", async () => {
+  Object.defineProperty(process, "platform", { value: "darwin" });
+  const hooks = await plugin.server({
+    client: { app: { log: async () => {} } },
+  } as unknown as Parameters<typeof plugin.server>[0]);
+  const emit = async (type: string, properties: Record<string, unknown>) => {
+    await hooks.event!({ event: { type, properties } } as Parameters<NonNullable<typeof hooks.event>>[0]);
+  };
+
+  await emit("session.status", { sessionID: "ses_v1_question", status: { type: "busy" } });
+  expect(inhibitorPids()).toHaveLength(1);
+
+  await emit("question.asked", { id: "req_v1_question", sessionID: "ses_v1_question" });
+  expect(entries()).toEqual([]);
+  expect(inhibitorPids()).toEqual([]);
+
+  await emit("question.rejected", { sessionID: "ses_v1_question", requestID: "req_v1_question" });
+  expect(entries()).toEqual(["ses_v1_question"]);
+  expect(inhibitorPids()).toHaveLength(1);
+
+  await emit("session.idle", { sessionID: "ses_v1_question" });
+  expect(inhibitorPids()).toEqual([]);
+});
+
+test("V1 keeps a session suspended while it has overlapping pending prompts", async () => {
+  Object.defineProperty(process, "platform", { value: "darwin" });
+  const hooks = await plugin.server({
+    client: { app: { log: async () => {} } },
+  } as unknown as Parameters<typeof plugin.server>[0]);
+  const emit = async (type: string, properties: Record<string, unknown>) => {
+    await hooks.event!({ event: { type, properties } } as Parameters<NonNullable<typeof hooks.event>>[0]);
+  };
+
+  await emit("session.status", { sessionID: "ses_v1_multi", status: { type: "busy" } });
+  expect(inhibitorPids()).toHaveLength(1);
+
+  await emit("permission.asked", { id: "req_a", sessionID: "ses_v1_multi" });
+  await emit("permission.asked", { id: "req_b", sessionID: "ses_v1_multi" });
+  expect(entries()).toEqual([]);
+  expect(inhibitorPids()).toEqual([]);
+
+  // Resolving the first prompt must not re-acquire while the second is pending.
+  await emit("permission.replied", { sessionID: "ses_v1_multi", requestID: "req_a", reply: "once" });
+  expect(entries()).toEqual([]);
+  expect(inhibitorPids()).toEqual([]);
+
+  // Resolving the last pending prompt re-acquires the entry.
+  await emit("permission.replied", { sessionID: "ses_v1_multi", requestID: "req_b", reply: "once" });
+  expect(entries()).toEqual(["ses_v1_multi"]);
+  expect(inhibitorPids()).toHaveLength(1);
+
+  await emit("session.idle", { sessionID: "ses_v1_multi" });
   expect(inhibitorPids()).toEqual([]);
 });

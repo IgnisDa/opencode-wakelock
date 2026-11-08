@@ -26,6 +26,26 @@ type LogFn = (
   extra?: Record<string, unknown>,
 ) => Promise<void>;
 
+// Extracts the sessionID a user-input event belongs to. v1 delivers the payload
+// under `properties`, v2 under `data`, and `form.created` nests it under `form`.
+function sessionIDOf(
+  event: { properties?: unknown; data?: unknown },
+): string | undefined {
+  const payload = event.properties ?? event.data;
+  const p = payload as { sessionID?: string; form?: { sessionID?: string } };
+  return p?.sessionID ?? p?.form?.sessionID;
+}
+
+// Extracts the request id a user-input event belongs to. An "asked"/"created"
+// event carries it as `id` (or `form.id`); a "replied"/"cancelled"/"rejected"
+// event carries it as `requestID` (or `id`).
+function requestIDOf(
+  event: { properties?: unknown; data?: unknown },
+): string | undefined {
+  const p = (event.properties ?? event.data) as { id?: string; requestID?: string; form?: { id?: string } };
+  return p?.id ?? p?.requestID ?? p?.form?.id;
+}
+
 function detectPlatform(): SupportedPlatform | null {
   if (process.platform === "darwin") return "darwin";
   if (process.platform === "linux") return "linux";
@@ -313,12 +333,86 @@ const wakelockPlugin: Plugin = async ({ client }) => {
 
   await log("info", "Startup cleanup complete", { platform });
 
+  // Sessions this instance considers active.
+  const activeSessions = new Set<string>();
+  // Per-session set of the request ids of prompts still awaiting the user. A
+  // session's lock entry is held back while this set is nonempty; it is
+  // re-acquired only once the last pending prompt for that session resolves, so
+  // overlapping prompts for one session do not re-acquire early. An "undefined"
+  // key stands in for a prompt that carried no request id.
+  const pendingPrompts = new Map<string, Set<string>>();
+  const clearPendingFor = (sessionID: string) => {
+    pendingPrompts.delete(sessionID);
+  };
+
+  // Event types that mean OpenCode is now blocked waiting for the user.
+  const WAIT_EVENTS = new Set([
+    "permission.asked",
+    "form.created",
+    "question.asked",
+  ]);
+  // Event types that mean the user has answered or dismissed a prompt.
+  const RESUME_EVENTS = new Set([
+    "permission.replied",
+    "form.replied",
+    "form.cancelled",
+    "question.replied",
+    "question.rejected",
+  ]);
+
+  // Hold back a session's lock entry so the system may sleep while the user is
+  // away. The entry is released only when the first pending prompt appears. When
+  // the wait event carries no sessionID (e.g. the question tool), fall back to
+  // holding back every active session, since the prompt blocks the running turn
+  // regardless of which session emitted it.
+  const suspendForInput = (sessionID: string | undefined, requestID: string | undefined) => {
+    const add = (id: string) => {
+      const set = pendingPrompts.get(id);
+      if (set) {
+        set.add(requestID ?? "undefined");
+        return;
+      }
+      pendingPrompts.set(id, new Set([requestID ?? "undefined"]));
+      release(id, platform);
+    };
+    if (sessionID) {
+      add(sessionID);
+      return;
+    }
+    for (const id of activeSessions) {
+      add(id);
+    }
+  };
+
+  // The user has answered (or dismissed) a prompt. Remove its request id and
+  // re-acquire the session's entry only when no prompt remains pending, and only
+  // if the session is still active, so a late reply does not resurrect a stale
+  // lock. A reply with no sessionID falls back to every pending session.
+  const resumeFromInput = (sessionID: string | undefined, requestID: string | undefined) => {
+    const key = requestID ?? "undefined";
+    const ids = sessionID ? [sessionID] : [...pendingPrompts.keys()];
+    for (const id of ids) {
+      const set = pendingPrompts.get(id);
+      if (!set) continue;
+      set.delete(key);
+      if (set.size > 0) continue;
+      pendingPrompts.delete(id);
+      if (!activeSessions.has(id)) continue;
+      const acquired = acquire(id, platform, log);
+      if (acquired) {
+        void log("info", "Re-acquired wakelock (user replied)", { sessionID: id });
+      }
+    }
+  };
+
   return {
     event: async ({ event }) => {
       await log("debug", "Event received", { type: event.type });
 
       if (event.type === "session.status" && event.properties.status.type === "busy") {
         const { sessionID } = (event as any).properties;
+        activeSessions.add(sessionID);
+        clearPendingFor(sessionID);
         if (acquire(sessionID, platform, log)) {
           await log("info", "Acquired wakelock (session busy)", { sessionID });
         }
@@ -326,14 +420,33 @@ const wakelockPlugin: Plugin = async ({ client }) => {
 
       if (event.type === "session.idle") {
         const { sessionID } = (event as any).properties;
+        clearPendingFor(sessionID);
+        activeSessions.delete(sessionID);
         release(sessionID, platform);
         await log("info", "Released wakelock (session idle)", { sessionID });
       }
 
       if (event.type === "session.error") {
         const { sessionID } = (event as any).properties;
-        if (sessionID) release(sessionID, platform);
-        await log("info", "Released wakelock (session error)", { sessionID });
+        if (sessionID) {
+          clearPendingFor(sessionID);
+          activeSessions.delete(sessionID);
+          release(sessionID, platform);
+          await log("info", "Released wakelock (session error)", { sessionID });
+        }
+      }
+
+      // OpenCode is blocked waiting for the user to answer (a permission prompt,
+      // the question tool, or a form). Release the session's lock entry so the
+      // system may sleep while the user is away.
+      const type = event.type as string;
+      if (WAIT_EVENTS.has(type)) {
+        suspendForInput(sessionIDOf(event), requestIDOf(event));
+      }
+
+      // The user has answered or cancelled. Re-acquire the session's entry.
+      if (RESUME_EVENTS.has(type)) {
+        resumeFromInput(sessionIDOf(event), requestIDOf(event));
       }
     },
   };
@@ -360,10 +473,22 @@ const wakelockPluginV2: PluginV2 = {
     };
     const ownedLocks = new Set<string>();
     const waitingSessions = new Map<string, object>();
+    // Per-session set of the request ids of prompts still awaiting the user. A
+    // session's lock entry is held back while this set is nonempty; it is
+    // re-acquired only once the last pending prompt for that session resolves. An
+    // "undefined" key stands in for a prompt that carried no request id.
+    const pendingPrompts = new Map<string, Set<string>>();
+    const clearPendingFor = (sessionID: string) => {
+      pendingPrompts.delete(sessionID);
+    };
+    // Sessions this instance still considers active. Guards re-acquisition after a
+    // session has gone terminal, so a late reply does not resurrect a stale lock.
+    const activeSessions = new Set<string>();
     let stopped = false;
 
     const acquireOwned = (key: string) => {
       if (stopped) return;
+      if (!key.startsWith("shell-")) activeSessions.add(key);
       if (!ownedLocks.has(key)) {
         ownedLocks.add(key);
         v2LockOwners.set(key, (v2LockOwners.get(key) ?? 0) + 1);
@@ -382,6 +507,47 @@ const wakelockPluginV2: PluginV2 = {
       release(key, platform);
     };
 
+    // OpenCode is blocked waiting for the user to answer (a permission prompt, the
+    // question tool, or a form). Hold back the session's lock entry so the system
+    // may sleep while the user is away. The entry is released only when the first
+    // pending prompt appears.
+    const suspendForInput = (sessionID: string | undefined, requestID: string | undefined) => {
+      if (stopped) return;
+      const add = (id: string) => {
+        const set = pendingPrompts.get(id);
+        if (set) {
+          set.add(requestID ?? "undefined");
+          return;
+        }
+        pendingPrompts.set(id, new Set([requestID ?? "undefined"]));
+        releaseOwned(id);
+      };
+      if (sessionID) {
+        add(sessionID);
+        return;
+      }
+      for (const id of activeSessions) {
+        add(id);
+      }
+    };
+
+    // The user has answered (or dismissed) a prompt. Remove its request id and
+    // re-acquire the session's entry only when no prompt remains pending and the
+    // session is still active.
+    const resumeFromInput = (sessionID: string | undefined, requestID: string | undefined) => {
+      if (stopped) return;
+      const key = requestID ?? "undefined";
+      const ids = sessionID ? [sessionID] : [...pendingPrompts.keys()];
+      for (const id of ids) {
+        const set = pendingPrompts.get(id);
+        if (!set) continue;
+        set.delete(key);
+        if (set.size > 0) continue;
+        pendingPrompts.delete(id);
+        if (activeSessions.has(id)) acquireOwned(id);
+      }
+    };
+
     const watchUntilIdle = (sessionID: string) => {
       if (waitingSessions.has(sessionID)) return;
       const token = {};
@@ -393,6 +559,11 @@ const wakelockPluginV2: PluginV2 = {
           // entry now owned by a replacement plugin instance after cleanup.
           if (waitingSessions.get(sessionID) !== token) return;
           waitingSessions.delete(sessionID);
+          // session.wait() can complete on terminal paths that emit no public
+          // idle event, so clear the session's bookkeeping here; otherwise a
+          // late input reply could re-acquire a lock with no wait to release it.
+          activeSessions.delete(sessionID);
+          clearPendingFor(sessionID);
           releaseOwned(sessionID);
         });
     };
@@ -431,8 +602,47 @@ const wakelockPluginV2: PluginV2 = {
             case "session.execution.failed":
             case "session.execution.interrupted":
               waitingSessions.delete(event.data.sessionID);
+              clearPendingFor(event.data.sessionID);
+              activeSessions.delete(event.data.sessionID);
               releaseOwned(event.data.sessionID);
               break;
+            // OpenCode is blocked waiting for the user to answer (a permission
+            // prompt or a form). Release the session's lock entry so the system
+            // may sleep while the user is away.
+            case "permission.asked":
+            case "form.created": {
+              const sessionID = (event.data as { sessionID?: string; form?: { sessionID?: string } }).sessionID
+                ?? (event.data as { form?: { sessionID?: string } }).form?.sessionID;
+              suspendForInput(sessionID, requestIDOf(event));
+              break;
+            }
+            // The user has answered or cancelled. Re-acquire the session's entry.
+            case "permission.replied":
+            case "form.replied":
+            case "form.cancelled":
+              resumeFromInput(
+                (event.data as { sessionID?: string; form?: { sessionID?: string } }).sessionID
+                ?? (event.data as { form?: { sessionID?: string } }).form?.sessionID,
+                requestIDOf(event),
+              );
+              break;
+          }
+
+          // The question tool emits question.* events that are not in this SDK's
+          // event union yet, but block the turn the same way as a permission
+          // prompt or form. Handle them via a string cast, as the v1 path does.
+          const questionType = event.type as string;
+          if (questionType === "question.asked") {
+            const sessionID = (event.data as { sessionID?: string; form?: { sessionID?: string } }).sessionID
+              ?? (event.data as { form?: { sessionID?: string } }).form?.sessionID;
+            suspendForInput(sessionID, requestIDOf(event));
+          }
+          if (questionType === "question.replied" || questionType === "question.rejected") {
+            resumeFromInput(
+              (event.data as { sessionID?: string; form?: { sessionID?: string } }).sessionID
+              ?? (event.data as { form?: { sessionID?: string } }).form?.sessionID,
+              requestIDOf(event),
+            );
           }
         }
       } catch (error) {
@@ -448,6 +658,8 @@ const wakelockPluginV2: PluginV2 = {
       if (stopped) return;
       stopped = true;
       waitingSessions.clear();
+      pendingPrompts.clear();
+      activeSessions.clear();
       controller.abort();
       await watcher;
       try {
