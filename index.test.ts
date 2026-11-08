@@ -423,6 +423,24 @@ for (const platform of ["darwin", "linux"] as const) {
       expect(inhibitorPids()).toEqual([]);
     });
 
+    test("a rejected question re-acquires the lock", async () => {
+      const runtime = await setupV2();
+      runtime.dispatch("ses_reject");
+      expect(inhibitorPids()).toHaveLength(1);
+
+      await runtime.emit("question.asked", { sessionID: "ses_reject" });
+      expect(entries()).toEqual([]);
+      expect(inhibitorPids()).toEqual([]);
+
+      await runtime.emit("question.rejected", { sessionID: "ses_reject", requestID: "req_reject" });
+      expect(entries()).toEqual(["ses_reject"]);
+      expect(inhibitorPids()).toHaveLength(1);
+
+      runtime.waits[0].deferred.resolve();
+      await flushWaits();
+      expect(inhibitorPids()).toEqual([]);
+    });
+
     test("a question.asked with no sessionID suspends every active session", async () => {
       const runtime = await setupV2();
       runtime.dispatch("ses_a");
@@ -652,7 +670,7 @@ test("V1 handles the question form via form.created / form.cancelled", async () 
   expect(inhibitorPids()).toEqual([]);
 });
 
-test("V1 handles the question tool via question.asked / question.replied", async () => {
+test("V1 handles the question tool via question.asked / question.rejected", async () => {
   Object.defineProperty(process, "platform", { value: "darwin" });
   const hooks = await plugin.server({
     client: { app: { log: async () => {} } },
@@ -668,7 +686,7 @@ test("V1 handles the question tool via question.asked / question.replied", async
   expect(entries()).toEqual([]);
   expect(inhibitorPids()).toEqual([]);
 
-  await emit("question.replied", { sessionID: "ses_v1_question" });
+  await emit("question.rejected", { sessionID: "ses_v1_question", requestID: "req_v1_question" });
   expect(entries()).toEqual(["ses_v1_question"]);
   expect(inhibitorPids()).toHaveLength(1);
 

@@ -335,13 +335,13 @@ const wakelockPlugin: Plugin = async ({ client }) => {
     "form.created",
     "question.asked",
   ]);
-  // Event types that mean the user has answered or cancelled.
+  // Event types that mean the user has answered or dismissed a prompt.
   const RESUME_EVENTS = new Set([
     "permission.replied",
     "form.replied",
     "form.cancelled",
     "question.replied",
-    "question.cancelled",
+    "question.rejected",
   ]);
 
   // Hold back a session's lock entry so the system may sleep while the user is
@@ -592,7 +592,7 @@ const wakelockPluginV2: PluginV2 = {
               ?? (event.data as { form?: { sessionID?: string } }).form?.sessionID;
             suspendForInput(sessionID);
           }
-          if (questionType === "question.replied" || questionType === "question.cancelled") {
+          if (questionType === "question.replied" || questionType === "question.rejected") {
             resumeFromInput((event.data as { sessionID?: string; form?: { sessionID?: string } }).sessionID
               ?? (event.data as { form?: { sessionID?: string } }).form?.sessionID);
           }
