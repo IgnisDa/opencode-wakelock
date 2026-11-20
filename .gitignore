@@ -1,9 +1,6 @@
 # Dependencies
 node_modules/
 
-# Bun
-bun.lock
-
 # IDE
 .vscode/
 .idea/
