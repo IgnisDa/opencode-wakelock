@@ -55,7 +55,7 @@ inhibitor stops only when no session or shell entries remain.
 | Platform | Command                                                  | Blocks                    |
 | -------- | -------------------------------------------------------- | ------------------------- |
 | macOS    | `caffeinate -i sh -c <watchdog>`                         | System idle timer         |
-| Linux    | `systemd-inhibit --what=sleep:idle ... sh -c <watchdog>` | System sleep + idle timer |
+| Linux    | `systemd-inhibit --what=sleep ... sh -c <watchdog>`      | System sleep              |
 
 On Linux, `systemd-inhibit` is used because it ships with systemd (installed by
 default on Fedora, Ubuntu, Arch, openSUSE, Debian, etc.) and works regardless
