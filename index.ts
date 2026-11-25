@@ -86,7 +86,7 @@ done`,
   return {
     command: "systemd-inhibit",
     args: [
-      "--what=sleep:idle",
+      "--what=sleep",
       "--who=opencode-wakelock",
       "--why=OpenCode session is active",
       ...watchdog,
